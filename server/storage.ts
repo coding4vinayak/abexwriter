@@ -13,7 +13,8 @@ import {
   usageEvents, type UsageEvent, type InsertUsageEvent,
   bookBibles, type BookBible, type InsertBookBible,
   steeringNotes, type SteeringNote, type InsertSteeringNote,
-  generations, type Generation, type InsertGeneration
+  generations, type Generation, type InsertGeneration,
+  chapterSummaries, type ChapterSummary, type InsertChapterSummary
 } from "@shared/schema";
 import { db, useDatabase } from "./db";
 import { eq, desc, and, sql, asc, gte, lte } from "drizzle-orm";
@@ -133,6 +134,11 @@ export interface IStorage {
   updateGeneration(id: number, patch: Partial<InsertGeneration>): Promise<Generation | undefined>;
   listGenerations(filter: { userId: number; bookId?: number; chapterId?: number; kind?: Generation["kind"]; limit?: number }): Promise<Generation[]>;
   getGeneration(id: number, userId: number): Promise<Generation | undefined>;
+
+  // Chapter summary operations
+  getChapterSummary(chapterId: number): Promise<ChapterSummary | undefined>;
+  getChapterSummariesForBook(bookId: number): Promise<ChapterSummary[]>;
+  upsertChapterSummary(input: InsertChapterSummary): Promise<ChapterSummary>;
 }
 
 export class DatabaseStorage implements IStorage {
@@ -906,6 +912,32 @@ export class DatabaseStorage implements IStorage {
       .where(and(eq(generations.id, id), eq(generations.userId, userId)));
     return row;
   }
+
+  // ───────────────────────────────────────────────────────────────────────────
+  // Chapter summaries
+  // ───────────────────────────────────────────────────────────────────────────
+  async getChapterSummary(chapterId: number): Promise<ChapterSummary | undefined> {
+    const [row] = await db.select().from(chapterSummaries).where(eq(chapterSummaries.chapterId, chapterId));
+    return row;
+  }
+
+  async getChapterSummariesForBook(bookId: number): Promise<ChapterSummary[]> {
+    return await db.select().from(chapterSummaries).where(eq(chapterSummaries.bookId, bookId));
+  }
+
+  async upsertChapterSummary(input: InsertChapterSummary): Promise<ChapterSummary> {
+    const existing = await this.getChapterSummary(input.chapterId);
+    if (existing) {
+      const [row] = await db
+        .update(chapterSummaries)
+        .set({ ...input, updatedAt: new Date() })
+        .where(eq(chapterSummaries.id, existing.id))
+        .returning();
+      return row;
+    }
+    const [row] = await db.insert(chapterSummaries).values(input).returning();
+    return row;
+  }
 }
 
 // Memory storage implementation for when database is not available
@@ -925,6 +957,7 @@ export class MemStorage implements IStorage {
   private bookBibles: BookBible[] = [];
   private steeringNotes: SteeringNote[] = [];
   private generations: Generation[] = [];
+  private chapterSummariesStore: ChapterSummary[] = [];
 
   // Counters for IDs
   private userId = 1;
@@ -942,6 +975,7 @@ export class MemStorage implements IStorage {
   private bookBibleId = 1;
   private steeringNoteId = 1;
   private generationId = 1;
+  private chapterSummaryId = 1;
   
   // User operations
   async getUser(id: number): Promise<User | undefined> {
@@ -1817,6 +1851,43 @@ export class MemStorage implements IStorage {
 
   async getGeneration(id: number, userId: number): Promise<Generation | undefined> {
     return this.generations.find((g) => g.id === id && g.userId === userId);
+  }
+
+  // ───────────────────────────────────────────────────────────────────────────
+  // Chapter summaries
+  // ───────────────────────────────────────────────────────────────────────────
+  async getChapterSummary(chapterId: number): Promise<ChapterSummary | undefined> {
+    return this.chapterSummariesStore.find((s) => s.chapterId === chapterId);
+  }
+
+  async getChapterSummariesForBook(bookId: number): Promise<ChapterSummary[]> {
+    return this.chapterSummariesStore.filter((s) => s.bookId === bookId);
+  }
+
+  async upsertChapterSummary(input: InsertChapterSummary): Promise<ChapterSummary> {
+    const idx = this.chapterSummariesStore.findIndex((s) => s.chapterId === input.chapterId);
+    if (idx !== -1) {
+      const updated: ChapterSummary = {
+        ...this.chapterSummariesStore[idx],
+        ...input,
+        updatedAt: new Date(),
+      } as any;
+      this.chapterSummariesStore[idx] = updated;
+      return updated;
+    }
+    const row: ChapterSummary = {
+      id: this.chapterSummaryId++,
+      chapterId: input.chapterId,
+      bookId: input.bookId,
+      summary: input.summary,
+      keyEvents: (input.keyEvents ?? []) as any,
+      characterAppearances: (input.characterAppearances ?? []) as any,
+      unresolvedHooks: (input.unresolvedHooks ?? []) as any,
+      createdAt: new Date(),
+      updatedAt: new Date(),
+    };
+    this.chapterSummariesStore.push(row);
+    return row;
   }
 }
 

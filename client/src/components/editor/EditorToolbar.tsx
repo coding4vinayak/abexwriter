@@ -13,6 +13,8 @@ import {
   History,
   Sparkles,
   Image,
+  FileText,
+  PenLine,
 } from "lucide-react";
 import type { Chapter } from "@shared/schema";
 
@@ -27,6 +29,9 @@ interface EditorToolbarProps {
   onOpenSteering?: () => void;
   onOpenVersions?: () => void;
   onGenerateImage?: () => void;
+  onSummarize?: () => void;
+  onExpand?: () => void;
+  content?: string;
 }
 
 export default function EditorToolbar({
@@ -40,7 +45,12 @@ export default function EditorToolbar({
   onOpenSteering,
   onOpenVersions,
   onGenerateImage,
+  onSummarize,
+  onExpand,
+  content,
 }: EditorToolbarProps) {
+  const hasEnoughContent = content ? content.length > 100 : false;
+
   return (
     <div className="border-b border-border bg-card px-4 py-3 flex items-center justify-between gap-2 flex-wrap">
       <div className="flex items-center min-w-0">
@@ -96,6 +106,30 @@ export default function EditorToolbar({
             <Button variant="outline" size="sm" onClick={onGenerateContent}>
               <Wand2 className="h-4 w-4 mr-1.5" /> AI Generate
             </Button>
+
+            {onExpand && hasEnoughContent && (
+              <Button
+                variant="outline"
+                size="sm"
+                onClick={onExpand}
+                title="Continue writing from where you left off"
+              >
+                <PenLine className="h-4 w-4 mr-1.5" />
+                <span className="hidden md:inline">Expand</span>
+              </Button>
+            )}
+
+            {onSummarize && hasEnoughContent && (
+              <Button
+                variant="outline"
+                size="sm"
+                onClick={onSummarize}
+                title="Summarize this chapter and update rolling context"
+              >
+                <FileText className="h-4 w-4 mr-1.5" />
+                <span className="hidden md:inline">Summarize</span>
+              </Button>
+            )}
 
             {onHumanize && (
               <Button
