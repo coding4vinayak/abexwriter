@@ -12,6 +12,7 @@ import {
   Compass,
   History,
   Sparkles,
+  Image,
 } from "lucide-react";
 import type { Chapter } from "@shared/schema";
 
@@ -25,6 +26,7 @@ interface EditorToolbarProps {
   onHumanize?: () => void;
   onOpenSteering?: () => void;
   onOpenVersions?: () => void;
+  onGenerateImage?: () => void;
 }
 
 export default function EditorToolbar({
@@ -37,6 +39,7 @@ export default function EditorToolbar({
   onHumanize,
   onOpenSteering,
   onOpenVersions,
+  onGenerateImage,
 }: EditorToolbarProps) {
   return (
     <div className="border-b border-border bg-card px-4 py-3 flex items-center justify-between gap-2 flex-wrap">
@@ -103,6 +106,18 @@ export default function EditorToolbar({
               >
                 <Sparkles className="h-4 w-4 mr-1.5" />
                 <span className="hidden md:inline">Humanize</span>
+              </Button>
+            )}
+
+            {onGenerateImage && (
+              <Button
+                variant="outline"
+                size="sm"
+                onClick={onGenerateImage}
+                title="Generate AI image for this chapter"
+              >
+                <Image className="h-4 w-4 mr-1.5" />
+                <span className="hidden md:inline">Image</span>
               </Button>
             )}
 

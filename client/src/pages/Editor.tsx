@@ -8,6 +8,8 @@ import SteeringPanel from "@/components/SteeringPanel";
 import VersionHistory from "@/components/VersionHistory";
 import GenerateChapterDialog from "@/components/GenerateChapterDialog";
 import HumanizeDialog from "@/components/HumanizeDialog";
+import ImageGenerateDialog from "@/components/ImageGenerateDialog";
+import ChapterImageGallery from "@/components/ChapterImageGallery";
 import { apiRequest, queryClient } from "@/lib/queryClient";
 import type { Book, Chapter } from "@shared/schema";
 import { Button } from "@/components/ui/button";
@@ -27,6 +29,8 @@ export default function Editor() {
   const [versionsOpen, setVersionsOpen] = useState(false);
   const [generateOpen, setGenerateOpen] = useState(false);
   const [humanizeOpen, setHumanizeOpen] = useState(false);
+  const [imageDialogOpen, setImageDialogOpen] = useState(false);
+  const [galleryOpen, setGalleryOpen] = useState(false);
 
   // Fetch book data
   const { data: book, isLoading: isLoadingBook } = useQuery({
@@ -271,6 +275,10 @@ export default function Editor() {
             if (!activeChapter || !content.trim()) return;
             setHumanizeOpen(true);
           }}
+          onGenerateImage={() => {
+            if (!activeChapter) return;
+            setImageDialogOpen(true);
+          }}
           isSaving={isSaving}
         />
 
@@ -357,6 +365,21 @@ export default function Editor() {
             setIsSaving(true);
             saveChapterMutation.mutate({ id: activeChapter.id, content: text });
           }}
+        />
+      )}
+      {book && activeChapter && (
+        <ImageGenerateDialog
+          open={imageDialogOpen}
+          onOpenChange={setImageDialogOpen}
+          bookId={book.id}
+          chapterId={activeChapter.id}
+        />
+      )}
+      {activeChapter && (
+        <ChapterImageGallery
+          chapterId={activeChapter.id}
+          open={galleryOpen}
+          onOpenChange={setGalleryOpen}
         />
       )}
     </div>

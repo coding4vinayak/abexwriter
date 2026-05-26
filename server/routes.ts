@@ -494,7 +494,7 @@ export async function registerRoutes(app: Express): Promise<Server> {
   // LLM generation, BYOK API keys, story bible, steering, generations →
   // see server/llm/routes.ts. Replaces the previous simulated handlers.
   // ──────────────────────────────────────────────────────────────────────
-  registerLlmRoutes(app);
+  await registerLlmRoutes(app);
 
   const httpServer = createServer(app);
   return httpServer;

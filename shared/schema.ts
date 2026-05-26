@@ -612,3 +612,46 @@ export const insertGenerationSchema = createInsertSchema(generations).omit({
 
 export type InsertGeneration = z.infer<typeof insertGenerationSchema>;
 export type Generation = typeof generations.$inferSelect;
+
+
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Chapter images — AI-generated illustrations for chapters.
+// Each chapter can have multiple images (scene illustrations, concept art, etc.)
+// ─────────────────────────────────────────────────────────────────────────────
+export const chapterImages = pgTable("chapter_images", {
+  id: serial("id").primaryKey(),
+  chapterId: integer("chapter_id").notNull().references(() => chapters.id, { onDelete: "cascade" }),
+  bookId: integer("book_id").notNull().references(() => books.id, { onDelete: "cascade" }),
+  userId: integer("user_id").notNull().references(() => users.id, { onDelete: "cascade" }),
+  /** Image URL (external) or data URI (base64). */
+  imageUrl: text("image_url").notNull(),
+  /** The prompt that generated this image. */
+  prompt: text("prompt").notNull(),
+  revisedPrompt: text("revised_prompt"),
+  provider: text("provider").notNull(), // 'openai' | 'stability' | 'replicate' | 'custom'
+  model: text("model").notNull(),
+  size: text("size").notNull().default("1024x1024"),
+  style: text("style"), // 'vivid' | 'natural' | null
+  /** Duration of generation in ms. */
+  durationMs: integer("duration_ms").notNull().default(0),
+  /** Optional caption/alt text. */
+  caption: text("caption"),
+  /** Order within the chapter's image gallery. */
+  orderIndex: integer("order_index").notNull().default(0),
+  createdAt: timestamp("created_at").notNull().defaultNow(),
+});
+
+export const chapterImagesRelations = relations(chapterImages, ({ one }) => ({
+  chapter: one(chapters, { fields: [chapterImages.chapterId], references: [chapters.id] }),
+  book: one(books, { fields: [chapterImages.bookId], references: [books.id] }),
+  user: one(users, { fields: [chapterImages.userId], references: [users.id] }),
+}));
+
+export const insertChapterImageSchema = createInsertSchema(chapterImages).omit({
+  id: true,
+  createdAt: true,
+});
+
+export type InsertChapterImage = z.infer<typeof insertChapterImageSchema>;
+export type ChapterImage = typeof chapterImages.$inferSelect;

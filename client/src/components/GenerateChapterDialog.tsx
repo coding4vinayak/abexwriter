@@ -362,6 +362,7 @@ export default function GenerateChapterDialog({
             onClick={() => generateMutation.mutate()}
             disabled={!canGenerate || generateMutation.isPending}
           >
+            {/* TODO: SSE streaming in future PR — replace spinner with real-time token display */}
             {generateMutation.isPending && <Loader2 className="h-4 w-4 animate-spin mr-2" />}
             Generate
           </Button>

@@ -168,7 +168,7 @@ async function loadStoryContext(bookId?: number, chapterId?: number): Promise<St
   return ctx;
 }
 
-export function registerLlmRoutes(app: Express): void {
+export async function registerLlmRoutes(app: Express): Promise<void> {
   // ───────────────────────────────────────────────────────────────────────
   // Provider catalog
   // ───────────────────────────────────────────────────────────────────────
@@ -864,5 +864,133 @@ export function registerLlmRoutes(app: Express): void {
       const { status, message } = errorToHttpStatus(err);
       res.status(status).json({ error: message });
     }
+  });
+
+  // ───────────────────────────────────────────────────────────────────────
+  // AI Image Generation
+  // ───────────────────────────────────────────────────────────────────────
+  const { generateImage, publicImageProviderCatalog } = await import("./images");
+
+  app.get("/api/images/providers", (_req, res) => {
+    res.json({ providers: publicImageProviderCatalog() });
+  });
+
+  app.post("/api/images/generate", async (req, res) => {
+    try {
+      const userId = getUserId(req);
+      const body = z
+        .object({
+          provider: z.string().min(1),
+          model: z.string().min(1),
+          prompt: z.string().min(1),
+          negativePrompt: z.string().optional(),
+          size: z.string().optional(),
+          style: z.enum(["vivid", "natural"]).optional(),
+          quality: z.enum(["standard", "hd"]).optional(),
+          apiKeyId: z.number().int().optional(),
+          bookId: z.number().int(),
+          chapterId: z.number().int(),
+          caption: z.string().optional(),
+          baseUrl: z.string().optional(),
+        })
+        .parse(req.body);
+
+      // Resolve API key
+      let apiKey = "";
+      if (body.apiKeyId) {
+        const keyRow = await storage.getUserApiKey(body.apiKeyId, userId);
+        if (!keyRow) return res.status(404).json({ error: "API key not found" });
+        apiKey = decrypt(keyRow.encryptedKey);
+      } else {
+        // Try platform env var
+        const { IMAGE_PROVIDERS } = await import("./images");
+        const providerInfo = (IMAGE_PROVIDERS as any)[body.provider];
+        if (providerInfo?.envVar) {
+          apiKey = process.env[providerInfo.envVar] || "";
+        }
+      }
+      if (!apiKey) {
+        return res.status(400).json({ error: "No API key available for this image provider." });
+      }
+
+      const result = await generateImage({
+        provider: body.provider as any,
+        apiKey,
+        baseUrl: body.baseUrl,
+        model: body.model,
+        prompt: body.prompt,
+        negativePrompt: body.negativePrompt,
+        size: body.size,
+        style: body.style,
+        quality: body.quality,
+      });
+
+      // Save to chapter_images
+      const { chapterImages } = await import("@shared/schema");
+      const { db } = await import("../db");
+      const [saved] = await db
+        .insert(chapterImages)
+        .values({
+          chapterId: body.chapterId,
+          bookId: body.bookId,
+          userId,
+          imageUrl: result.url,
+          prompt: body.prompt,
+          revisedPrompt: result.revisedPrompt ?? null,
+          provider: body.provider,
+          model: body.model,
+          size: body.size ?? "1024x1024",
+          style: body.style ?? null,
+          durationMs: result.durationMs,
+          caption: body.caption ?? null,
+          orderIndex: 0,
+        })
+        .returning();
+
+      res.json({ image: saved, durationMs: result.durationMs });
+    } catch (err: any) {
+      if (err instanceof z.ZodError) return res.status(400).json({ error: err.errors });
+      res.status(500).json({ error: err.message ?? "Image generation failed" });
+    }
+  });
+
+  app.get("/api/chapters/:chapterId/images", async (req, res) => {
+    try {
+      const chapterId = Number(req.params.chapterId);
+      const { chapterImages } = await import("@shared/schema");
+      const { db } = await import("../db");
+      const { eq, asc } = await import("drizzle-orm");
+      const images = await db
+        .select()
+        .from(chapterImages)
+        .where(eq(chapterImages.chapterId, chapterId))
+        .orderBy(asc(chapterImages.orderIndex));
+      res.json(images);
+    } catch (err: any) {
+      res.status(500).json({ error: err.message });
+    }
+  });
+
+  app.delete("/api/images/:id", async (req, res) => {
+    try {
+      const id = Number(req.params.id);
+      const { chapterImages } = await import("@shared/schema");
+      const { db } = await import("../db");
+      const { eq } = await import("drizzle-orm");
+      await db.delete(chapterImages).where(eq(chapterImages.id, id));
+      res.status(204).end();
+    } catch (err: any) {
+      res.status(500).json({ error: err.message });
+    }
+  });
+
+  // ───────────────────────────────────────────────────────────────────────
+  // Streaming SSE endpoint for chapter content generation
+  // TODO: SSE streaming in future PR — will stream tokens as they arrive
+  // from the LLM provider, enabling real-time typing display in the editor.
+  // For now, the frontend shows a Loader2 spinner during generation.
+  // ───────────────────────────────────────────────────────────────────────
+  app.get("/api/health", (_req, res) => {
+    res.json({ status: "ok", timestamp: new Date().toISOString(), version: "1.0.0" });
   });
 }
