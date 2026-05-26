@@ -16,8 +16,12 @@ import Editor from "@/pages/Editor";
 import BookGeneration from "@/pages/BookGeneration";
 import Templates from "@/pages/Templates";
 import TemplateEditor from "@/pages/TemplateEditor";
+import Login from "@/pages/Login";
+import McpStatus from "@/pages/McpStatus";
 import Sidebar from "@/components/Sidebar";
 import MobileNavbar from "@/components/MobileNavbar";
+import { useAuth } from "@/hooks/useAuth";
+import { Loader2 } from "lucide-react";
 
 function Router() {
   return (
@@ -28,6 +32,7 @@ function Router() {
       <Route path="/api-keys" component={ApiKeys} />
       <Route path="/database" component={DatabaseConfig} />
       <Route path="/import" component={ImportExport} />
+      <Route path="/mcp" component={McpStatus} />
       <Route path="/generate" component={BookGeneration} />
       <Route path="/templates" component={Templates} />
       <Route path="/templates/create" component={TemplateEditor} />
@@ -63,36 +68,65 @@ function App() {
     <QueryClientProvider client={queryClient}>
       <ThemeProvider attribute="class" defaultTheme="system" enableSystem>
         <TooltipProvider>
-          <div className="flex h-screen overflow-hidden bg-background">
-            {/* Sidebar (desktop) */}
-            <Sidebar isVisible={true} />
-
-            {/* Mobile Menu (when active) */}
-            {isMobileMenuOpen && (
-              <div className="fixed inset-0 z-40 lg:hidden">
-                {/* Overlay */}
-                <div 
-                  className="fixed inset-0 bg-gray-600 bg-opacity-75 dark:bg-gray-900 dark:bg-opacity-80 transition-opacity" 
-                  onClick={toggleMobileMenu}
-                />
-                <Sidebar isVisible={isMobileMenuOpen} closeMobileMenu={toggleMobileMenu} />
-              </div>
-            )}
-
-            {/* Main Content */}
-            <div className="flex-1 flex flex-col bg-background">
-              {/* Mobile Navbar */}
-              <MobileNavbar toggleMobileMenu={toggleMobileMenu} />
-              
-              {/* Page Content */}
-              <main className="flex-1 overflow-y-auto">
-                <Router />
-              </main>
-            </div>
-          </div>
+          <AuthenticatedApp
+            isMobileMenuOpen={isMobileMenuOpen}
+            toggleMobileMenu={toggleMobileMenu}
+          />
         </TooltipProvider>
       </ThemeProvider>
     </QueryClientProvider>
+  );
+}
+
+function AuthenticatedApp({
+  isMobileMenuOpen,
+  toggleMobileMenu,
+}: {
+  isMobileMenuOpen: boolean;
+  toggleMobileMenu: () => void;
+}) {
+  const { isAuthenticated, isLoading } = useAuth();
+
+  if (isLoading) {
+    return (
+      <div className="flex h-screen items-center justify-center bg-background">
+        <Loader2 className="h-8 w-8 animate-spin text-primary" />
+      </div>
+    );
+  }
+
+  if (!isAuthenticated) {
+    return <Login />;
+  }
+
+  return (
+    <div className="flex h-screen overflow-hidden bg-background">
+      {/* Sidebar (desktop) */}
+      <Sidebar isVisible={true} />
+
+      {/* Mobile Menu (when active) */}
+      {isMobileMenuOpen && (
+        <div className="fixed inset-0 z-40 lg:hidden">
+          {/* Overlay */}
+          <div 
+            className="fixed inset-0 bg-gray-600 bg-opacity-75 dark:bg-gray-900 dark:bg-opacity-80 transition-opacity" 
+            onClick={toggleMobileMenu}
+          />
+          <Sidebar isVisible={isMobileMenuOpen} closeMobileMenu={toggleMobileMenu} />
+        </div>
+      )}
+
+      {/* Main Content */}
+      <div className="flex-1 flex flex-col bg-background">
+        {/* Mobile Navbar */}
+        <MobileNavbar toggleMobileMenu={toggleMobileMenu} />
+        
+        {/* Page Content */}
+        <main className="flex-1 overflow-y-auto">
+          <Router />
+        </main>
+      </div>
+    </div>
   );
 }
 

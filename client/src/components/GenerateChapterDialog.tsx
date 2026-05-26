@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useState, useCallback, useRef } from "react";
 import { useQuery, useMutation } from "@tanstack/react-query";
 import { apiRequest, queryClient } from "@/lib/queryClient";
 import {
@@ -21,6 +21,7 @@ import {
   SelectValue,
 } from "@/components/ui/select";
 import { Badge } from "@/components/ui/badge";
+import { Switch } from "@/components/ui/switch";
 import { useToast } from "@/hooks/use-toast";
 import { Loader2, Sparkles } from "lucide-react";
 import { Link } from "wouter";
@@ -81,6 +82,10 @@ export default function GenerateChapterDialog({
   const [language, setLanguage] = useState<string>("English");
   const [targetWords, setTargetWords] = useState<number>(2500);
   const [extraNote, setExtraNote] = useState<string>("");
+  const [useStreaming, setUseStreaming] = useState<boolean>(true);
+  const [streamingText, setStreamingText] = useState<string>("");
+  const [isStreaming, setIsStreaming] = useState<boolean>(false);
+  const abortRef = useRef<AbortController | null>(null);
 
   const providersQuery = useQuery({
     queryKey: ["/api/llm/providers"],
@@ -191,6 +196,118 @@ export default function GenerateChapterDialog({
       });
     },
   });
+
+  const handleStreamGenerate = useCallback(async () => {
+    setStreamingText("");
+    setIsStreaming(true);
+    const controller = new AbortController();
+    abortRef.current = controller;
+
+    try {
+      const body: Record<string, unknown> = {
+        bookId,
+        chapterId,
+        title: chapterTitle,
+        outline: chapterOutline + (extraNote ? `\n\nExtra direction: ${extraNote}` : ""),
+        provider,
+        model,
+        mode,
+        language,
+        targetWordCount: targetWords,
+      };
+      if (apiKeyId) body.apiKeyId = apiKeyId;
+
+      const response = await fetch("/api/generate/chapter-content/stream", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        credentials: "include",
+        body: JSON.stringify(body),
+        signal: controller.signal,
+      });
+
+      if (!response.ok) {
+        const err = await response.text();
+        throw new Error(err || `HTTP ${response.status}`);
+      }
+
+      const reader = response.body?.getReader();
+      if (!reader) throw new Error("No response body");
+
+      const decoder = new TextDecoder();
+      let buffer = "";
+      let fullText = "";
+      let generationId: number | undefined;
+
+      while (true) {
+        const { done, value } = await reader.read();
+        if (done) break;
+
+        buffer += decoder.decode(value, { stream: true });
+        const lines = buffer.split("\n");
+        buffer = lines.pop() || "";
+
+        for (const line of lines) {
+          const trimmed = line.trim();
+          if (!trimmed) continue;
+
+          if (trimmed.startsWith("event: done")) {
+            // Next data line contains the final payload
+            continue;
+          }
+          if (trimmed.startsWith("event: error")) {
+            continue;
+          }
+          if (trimmed.startsWith("data: ")) {
+            const jsonStr = trimmed.slice(6);
+            try {
+              const parsed = JSON.parse(jsonStr);
+              if (parsed.text) {
+                fullText += parsed.text;
+                setStreamingText(fullText);
+              }
+              if (parsed.content && parsed.generationId) {
+                // Final done event
+                fullText = parsed.content;
+                generationId = parsed.generationId;
+              }
+              if (parsed.error) {
+                throw new Error(parsed.error);
+              }
+            } catch (e: any) {
+              if (e.message && !e.message.includes("JSON")) throw e;
+            }
+          }
+        }
+      }
+
+      // Save last selection
+      try {
+        localStorage.setItem(LS_KEY, JSON.stringify({ provider, model, mode }));
+      } catch { /* ignore */ }
+
+      if (fullText) {
+        onGenerated(fullText, generationId ?? 0);
+        queryClient.invalidateQueries({ queryKey: ["/api/generations", { chapterId }] });
+        queryClient.invalidateQueries({ queryKey: ["/api/usage"] });
+        onOpenChange(false);
+        toast({
+          title: "Chapter generated (streamed)",
+          description: "Content saved to version history.",
+        });
+      }
+    } catch (err: any) {
+      if (err.name !== "AbortError") {
+        toast({
+          title: "Streaming failed",
+          description: err?.message ?? "Unknown error",
+          variant: "destructive",
+        });
+      }
+    } finally {
+      setIsStreaming(false);
+      abortRef.current = null;
+    }
+  }, [bookId, chapterId, chapterTitle, chapterOutline, extraNote, provider, model, mode, language, targetWords, apiKeyId, onGenerated, onOpenChange, toast]);
 
   const canGenerate =
     !!provider &&
@@ -352,19 +469,47 @@ export default function GenerateChapterDialog({
               onChange={(e) => setExtraNote(e.target.value)}
             />
           </div>
+
+          <div className="flex items-center gap-2">
+            <Switch
+              checked={useStreaming}
+              onCheckedChange={setUseStreaming}
+              id="stream-toggle"
+            />
+            <Label htmlFor="stream-toggle" className="text-sm cursor-pointer">
+              Stream tokens (live preview)
+            </Label>
+          </div>
+
+          {isStreaming && streamingText && (
+            <div className="border rounded-md p-3 bg-muted/30 max-h-40 overflow-y-auto">
+              <p className="text-xs text-muted-foreground mb-1">Live preview:</p>
+              <p className="text-sm whitespace-pre-wrap">{streamingText.slice(-500)}</p>
+            </div>
+          )}
         </div>
 
         <DialogFooter>
-          <Button variant="ghost" onClick={() => onOpenChange(false)}>
+          <Button variant="ghost" onClick={() => {
+            if (isStreaming && abortRef.current) {
+              abortRef.current.abort();
+            }
+            onOpenChange(false);
+          }}>
             Cancel
           </Button>
           <Button
-            onClick={() => generateMutation.mutate()}
-            disabled={!canGenerate || generateMutation.isPending}
+            onClick={() => {
+              if (useStreaming) {
+                handleStreamGenerate();
+              } else {
+                generateMutation.mutate();
+              }
+            }}
+            disabled={!canGenerate || generateMutation.isPending || isStreaming}
           >
-            {/* TODO: SSE streaming in future PR — replace spinner with real-time token display */}
-            {generateMutation.isPending && <Loader2 className="h-4 w-4 animate-spin mr-2" />}
-            Generate
+            {(generateMutation.isPending || isStreaming) && <Loader2 className="h-4 w-4 animate-spin mr-2" />}
+            {isStreaming ? "Streaming..." : "Generate"}
           </Button>
         </DialogFooter>
       </DialogContent>

@@ -2,6 +2,8 @@ import type { Express, Request, Response } from "express";
 import { createServer, type Server } from "http";
 import { storage } from "./storage";
 import { z } from "zod";
+import { hashPassword, verifyPassword } from "./auth";
+import { registerMcpRoutes } from "./mcp";
 import { 
   insertUserSchema, 
   insertBookSchema, 
@@ -29,6 +31,83 @@ const validateBody = <T>(schema: z.ZodType<T>) => {
 };
 
 export async function registerRoutes(app: Express): Promise<Server> {
+  // ──────────────────────────────────────────────────────────────────────
+  // Auth routes (session-based)
+  // ──────────────────────────────────────────────────────────────────────
+  app.post("/api/auth/register", async (req, res) => {
+    try {
+      const { username, password } = z.object({
+        username: z.string().min(3).max(50),
+        password: z.string().min(6).max(128),
+      }).parse(req.body);
+
+      const existing = await storage.getUserByUsername(username);
+      if (existing) {
+        return res.status(409).json({ error: "Username already taken" });
+      }
+
+      const passwordHash = hashPassword(password);
+      const user = await storage.createUser({ username, password: passwordHash });
+
+      (req.session as any).userId = user.id;
+      res.status(201).json({ id: user.id, username: user.username });
+    } catch (error: any) {
+      if (error instanceof z.ZodError) {
+        return res.status(400).json({ error: "Invalid input", details: error.errors });
+      }
+      res.status(500).json({ error: "Registration failed" });
+    }
+  });
+
+  app.post("/api/auth/login", async (req, res) => {
+    try {
+      const { username, password } = z.object({
+        username: z.string().min(1),
+        password: z.string().min(1),
+      }).parse(req.body);
+
+      const user = await storage.getUserByUsername(username);
+      if (!user) {
+        return res.status(401).json({ error: "Invalid credentials" });
+      }
+
+      const valid = verifyPassword(password, user.password);
+      if (!valid) {
+        return res.status(401).json({ error: "Invalid credentials" });
+      }
+
+      (req.session as any).userId = user.id;
+      res.json({ id: user.id, username: user.username });
+    } catch (error: any) {
+      if (error instanceof z.ZodError) {
+        return res.status(400).json({ error: "Invalid input", details: error.errors });
+      }
+      res.status(500).json({ error: "Login failed" });
+    }
+  });
+
+  app.post("/api/auth/logout", (req, res) => {
+    req.session.destroy((err) => {
+      if (err) {
+        return res.status(500).json({ error: "Logout failed" });
+      }
+      res.clearCookie("connect.sid");
+      res.json({ ok: true });
+    });
+  });
+
+  app.get("/api/auth/me", async (req, res) => {
+    const userId = (req.session as any)?.userId;
+    if (!userId) {
+      return res.status(401).json({ error: "Not authenticated" });
+    }
+    const user = await storage.getUser(userId);
+    if (!user) {
+      return res.status(401).json({ error: "Not authenticated" });
+    }
+    res.json({ id: user.id, username: user.username });
+  });
+
   // User routes
   app.post("/api/users", validateBody(insertUserSchema), async (req, res) => {
     try {
@@ -491,10 +570,74 @@ export async function registerRoutes(app: Express): Promise<Server> {
     }
   });
   // ──────────────────────────────────────────────────────────────────────
+  // Export routes (DOCX, PDF, Text, EPUB)
+  // ──────────────────────────────────────────────────────────────────────
+  app.get("/api/books/:id/export/docx", async (req, res) => {
+    try {
+      const { exportToDocx } = await import("./export");
+      const bookId = Number(req.params.id);
+      const buffer = await exportToDocx(bookId);
+      const book = await storage.getBook(bookId);
+      res.setHeader("Content-Type", "application/vnd.openxmlformats-officedocument.wordprocessingml.document");
+      res.setHeader("Content-Disposition", `attachment; filename="${(book?.title || "book").replace(/"/g, "")}.docx"`);
+      res.send(buffer);
+    } catch (error: any) {
+      res.status(500).json({ error: error.message || "Export failed" });
+    }
+  });
+
+  app.get("/api/books/:id/export/pdf", async (req, res) => {
+    try {
+      const { exportToPdf } = await import("./export");
+      const bookId = Number(req.params.id);
+      const buffer = await exportToPdf(bookId);
+      const book = await storage.getBook(bookId);
+      res.setHeader("Content-Type", "application/pdf");
+      res.setHeader("Content-Disposition", `attachment; filename="${(book?.title || "book").replace(/"/g, "")}.pdf"`);
+      res.send(buffer);
+    } catch (error: any) {
+      res.status(500).json({ error: error.message || "PDF export failed" });
+    }
+  });
+
+  app.get("/api/books/:id/export/text", async (req, res) => {
+    try {
+      const { exportToText } = await import("./export");
+      const bookId = Number(req.params.id);
+      const text = await exportToText(bookId);
+      const book = await storage.getBook(bookId);
+      res.setHeader("Content-Type", "text/plain; charset=utf-8");
+      res.setHeader("Content-Disposition", `attachment; filename="${(book?.title || "book").replace(/"/g, "")}.txt"`);
+      res.send(text);
+    } catch (error: any) {
+      res.status(500).json({ error: error.message || "Text export failed" });
+    }
+  });
+
+  app.get("/api/books/:id/export/epub", async (req, res) => {
+    try {
+      const { exportToEpub } = await import("./export-epub");
+      const bookId = Number(req.params.id);
+      const buffer = await exportToEpub(bookId);
+      const book = await storage.getBook(bookId);
+      res.setHeader("Content-Type", "application/epub+zip");
+      res.setHeader("Content-Disposition", `attachment; filename="${(book?.title || "book").replace(/"/g, "")}.epub"`);
+      res.send(buffer);
+    } catch (error: any) {
+      res.status(500).json({ error: error.message || "EPUB export failed" });
+    }
+  });
+
+  // ──────────────────────────────────────────────────────────────────────
   // LLM generation, BYOK API keys, story bible, steering, generations →
   // see server/llm/routes.ts. Replaces the previous simulated handlers.
   // ──────────────────────────────────────────────────────────────────────
   await registerLlmRoutes(app);
+
+  // ──────────────────────────────────────────────────────────────────────
+  // MCP integration (skeleton) — see server/mcp.ts
+  // ──────────────────────────────────────────────────────────────────────
+  registerMcpRoutes(app);
 
   const httpServer = createServer(app);
   return httpServer;
