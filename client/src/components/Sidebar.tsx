@@ -100,6 +100,7 @@ export default function Sidebar({ isVisible, closeMobileMenu }: SidebarProps) {
             <NavigationItem path="/projects" icon="fas fa-folder" label="My Projects" />
             <NavigationItem path="/generate" icon="fas fa-magic" label="AI Book Writer" />
             <NavigationItem path="/templates" icon="fas fa-file-alt" label="Templates" />
+            <NavigationItem path="/stats" icon="fas fa-chart-bar" label="Statistics" />
             <NavigationItem path="/settings" icon="fas fa-tools" label="Settings" />
             <NavigationItem path="/api-keys" icon="fas fa-key" label="API Keys" />
             <NavigationItem path="/database" icon="fas fa-database" label="Database" />

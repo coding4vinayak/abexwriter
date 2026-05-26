@@ -629,6 +629,109 @@ export async function registerRoutes(app: Express): Promise<Server> {
   });
 
   // ──────────────────────────────────────────────────────────────────────
+  // Beat Sheet Templates
+  // ──────────────────────────────────────────────────────────────────────
+  app.get("/api/templates/beat-sheets", (_req, res) => {
+    res.json([
+      { id: "save-the-cat", name: "Save the Cat", beats: ["Opening Image", "Theme Stated", "Set-Up", "Catalyst", "Debate", "Break into Two", "B Story", "Fun and Games", "Midpoint", "Bad Guys Close In", "All Is Lost", "Dark Night of the Soul", "Break into Three", "Finale", "Final Image"] },
+      { id: "heros-journey", name: "Hero's Journey", beats: ["Ordinary World", "Call to Adventure", "Refusal of the Call", "Meeting the Mentor", "Crossing the Threshold", "Tests, Allies, Enemies", "Approach to the Inmost Cave", "Ordeal", "Reward", "The Road Back", "Resurrection", "Return with the Elixir"] },
+      { id: "three-act", name: "Three-Act Structure", beats: ["Act 1: Setup", "Inciting Incident", "Plot Point 1", "Act 2: Confrontation", "Midpoint", "Plot Point 2", "Act 3: Resolution", "Climax", "Denouement"] },
+      { id: "snowflake", name: "Snowflake Method", beats: ["One-Sentence Summary", "One-Paragraph Summary", "Character Summaries", "Expand to One Page", "Character Synopses", "Expand to Four Pages", "Character Charts", "Scene List"] },
+      { id: "fichtean-curve", name: "Fichtean Curve", beats: ["Crisis 1 (Inciting)", "Rising Action", "Crisis 2", "Rising Action", "Crisis 3", "Rising Action", "Climax", "Falling Action"] },
+    ]);
+  });
+
+  // ──────────────────────────────────────────────────────────────────────
+  // Chapter Reorder
+  // ──────────────────────────────────────────────────────────────────────
+  app.put("/api/chapters/reorder", async (req, res) => {
+    try {
+      const { bookId, chapterIds } = z.object({
+        bookId: z.number().int(),
+        chapterIds: z.array(z.number().int()),
+      }).parse(req.body);
+
+      // Update orderIndex for each chapter
+      for (let i = 0; i < chapterIds.length; i++) {
+        await storage.updateChapter(chapterIds[i], { orderIndex: i });
+      }
+
+      const chapters = await storage.getChapters(bookId);
+      res.json(chapters);
+    } catch (error: any) {
+      if (error instanceof z.ZodError) {
+        return res.status(400).json({ error: "Invalid request data", details: error.errors });
+      }
+      res.status(500).json({ error: "Failed to reorder chapters" });
+    }
+  });
+
+  // ──────────────────────────────────────────────────────────────────────
+  // Style DNA Fingerprint
+  // ──────────────────────────────────────────────────────────────────────
+  app.post("/api/books/:id/style-dna", async (req, res) => {
+    try {
+      const bookId = Number(req.params.id);
+      const { sampleText, provider, model, mode, apiKeyId } = z.object({
+        sampleText: z.string().min(500, "Need at least 500 characters of sample text"),
+        provider: z.string().min(1),
+        model: z.string().min(1),
+        mode: z.enum(["byok", "platform"]).default("byok"),
+        apiKeyId: z.number().int().optional(),
+      }).parse(req.body);
+
+      const { generateChat, errorToHttpStatus } = await import("./llm/client");
+      const userId = ((req as any).session?.userId as number) ?? 1;
+
+      const messages = [
+        {
+          role: "system" as const,
+          content: "You are a writing style analyst. Analyze the given writing sample and extract a comprehensive style fingerprint. Report the following in a clear, readable format:\n\n- Average sentence length (short/medium/long)\n- Vocabulary level (simple/moderate/literary)\n- Dialogue frequency (percentage of text)\n- Metaphor density (sparse/moderate/rich)\n- POV (first/second/third limited/third omniscient)\n- Tense (past/present)\n- Paragraph length tendency (short/medium/long)\n- Distinctive patterns (3-5 unique voice markers)\n- Forbidden patterns (things this author avoids)\n\nFormat as a clean style guide that can be used to instruct an AI to write in this style.",
+        },
+        {
+          role: "user" as const,
+          content: `Analyze this writing sample and extract its style fingerprint:\n\n${sampleText.slice(0, 8000)}`,
+        },
+      ];
+
+      const result = await generateChat({
+        userId,
+        providerId: provider as any,
+        mode,
+        apiKeyId,
+        model,
+        messages,
+        temperature: 0.3,
+        maxTokens: 2000,
+        feature: "style_dna",
+        bookId,
+      });
+
+      // Save to book bible styleGuide
+      const bible = await storage.getBookBible(bookId);
+      if (bible) {
+        await storage.updateBookBible(bookId, { styleGuide: result.text });
+      } else {
+        await storage.upsertBookBible({
+          bookId,
+          styleGuide: result.text,
+          entities: {},
+          language: "English",
+        });
+      }
+
+      res.json({ styleGuide: result.text, usage: result });
+    } catch (error: any) {
+      if (error instanceof z.ZodError) {
+        return res.status(400).json({ error: "Invalid request data", details: error.errors });
+      }
+      const { errorToHttpStatus } = await import("./llm/client");
+      const { status, message } = errorToHttpStatus(error);
+      res.status(status).json({ error: message });
+    }
+  });
+
+  // ──────────────────────────────────────────────────────────────────────
   // LLM generation, BYOK API keys, story bible, steering, generations →
   // see server/llm/routes.ts. Replaces the previous simulated handlers.
   // ──────────────────────────────────────────────────────────────────────

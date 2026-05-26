@@ -15,6 +15,9 @@ import {
   Image,
   FileText,
   PenLine,
+  Search,
+  Maximize,
+  Circle,
 } from "lucide-react";
 import type { Chapter } from "@shared/schema";
 
@@ -31,7 +34,11 @@ interface EditorToolbarProps {
   onGenerateImage?: () => void;
   onSummarize?: () => void;
   onExpand?: () => void;
+  onResearch?: () => void;
+  onFocusMode?: () => void;
   content?: string;
+  isDirty?: boolean;
+  autoSaveLabel?: string | null;
 }
 
 export default function EditorToolbar({
@@ -47,16 +54,29 @@ export default function EditorToolbar({
   onGenerateImage,
   onSummarize,
   onExpand,
+  onResearch,
+  onFocusMode,
   content,
+  isDirty,
+  autoSaveLabel,
 }: EditorToolbarProps) {
   const hasEnoughContent = content ? content.length > 100 : false;
 
   return (
     <div className="border-b border-border bg-card px-4 py-3 flex items-center justify-between gap-2 flex-wrap">
-      <div className="flex items-center min-w-0">
+      <div className="flex items-center min-w-0 gap-2">
         <h3 className="text-lg font-medium text-foreground truncate">
           {chapter ? chapter.title : "No Chapter Selected"}
         </h3>
+        {/* Unsaved changes indicator */}
+        {isDirty && !autoSaveLabel && (
+          <Circle className="h-2.5 w-2.5 fill-yellow-500 text-yellow-500" />
+        )}
+        {autoSaveLabel && (
+          <span className="text-xs text-green-600 dark:text-green-400 font-medium">
+            {autoSaveLabel}
+          </span>
+        )}
       </div>
 
       <div className="flex items-center gap-2 flex-wrap">
@@ -70,7 +90,7 @@ export default function EditorToolbar({
               </Button>
             </Link>
             {onOpenSteering && (
-              <Button variant="outline" size="sm" onClick={onOpenSteering} title="Steer the story">
+              <Button variant="outline" size="sm" onClick={onOpenSteering} title="Steer the story (⌘J)">
                 <Compass className="h-4 w-4 mr-1.5" />
                 <span className="hidden md:inline">Steer</span>
               </Button>
@@ -80,7 +100,7 @@ export default function EditorToolbar({
                 variant="outline"
                 size="sm"
                 onClick={onOpenVersions}
-                title="Version history"
+                title="Version history (⌘L)"
               >
                 <History className="h-4 w-4 mr-1.5" />
                 <span className="hidden md:inline">Versions</span>
@@ -103,7 +123,7 @@ export default function EditorToolbar({
               </Button>
             </div>
 
-            <Button variant="outline" size="sm" onClick={onGenerateContent}>
+            <Button variant="outline" size="sm" onClick={onGenerateContent} title="AI Generate (⌘G)">
               <Wand2 className="h-4 w-4 mr-1.5" /> AI Generate
             </Button>
 
@@ -112,7 +132,7 @@ export default function EditorToolbar({
                 variant="outline"
                 size="sm"
                 onClick={onExpand}
-                title="Continue writing from where you left off"
+                title="Continue writing (⌘E)"
               >
                 <PenLine className="h-4 w-4 mr-1.5" />
                 <span className="hidden md:inline">Expand</span>
@@ -124,7 +144,7 @@ export default function EditorToolbar({
                 variant="outline"
                 size="sm"
                 onClick={onSummarize}
-                title="Summarize this chapter and update rolling context"
+                title="Summarize this chapter"
               >
                 <FileText className="h-4 w-4 mr-1.5" />
                 <span className="hidden md:inline">Summarize</span>
@@ -136,7 +156,7 @@ export default function EditorToolbar({
                 variant="outline"
                 size="sm"
                 onClick={onHumanize}
-                title="Strip AI-slop and add human voice"
+                title="Humanize (⌘H)"
               >
                 <Sparkles className="h-4 w-4 mr-1.5" />
                 <span className="hidden md:inline">Humanize</span>
@@ -148,10 +168,33 @@ export default function EditorToolbar({
                 variant="outline"
                 size="sm"
                 onClick={onGenerateImage}
-                title="Generate AI image for this chapter"
+                title="Generate AI image"
               >
                 <Image className="h-4 w-4 mr-1.5" />
                 <span className="hidden md:inline">Image</span>
+              </Button>
+            )}
+
+            {onResearch && (
+              <Button
+                variant="outline"
+                size="sm"
+                onClick={onResearch}
+                title="Research panel"
+              >
+                <Search className="h-4 w-4 mr-1.5" />
+                <span className="hidden md:inline">Research</span>
+              </Button>
+            )}
+
+            {onFocusMode && (
+              <Button
+                variant="outline"
+                size="sm"
+                onClick={onFocusMode}
+                title="Focus mode (⌘+Shift+F)"
+              >
+                <Maximize className="h-4 w-4" />
               </Button>
             )}
 
@@ -170,10 +213,11 @@ export default function EditorToolbar({
               disabled={isSaving}
               size="sm"
               className="bg-primary hover:bg-primary/90 text-primary-foreground"
+              title="Save (⌘S)"
             >
               {isSaving ? (
                 <>
-                  <Loader2 className="h-4 w-4 mr-1.5 animate-spin" /> Saving…
+                  <Loader2 className="h-4 w-4 mr-1.5 animate-spin" /> Saving...
                 </>
               ) : (
                 <>
