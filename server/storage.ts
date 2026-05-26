@@ -8,7 +8,12 @@ import {
   edits, type Edit, type InsertEdit,
   writingActivities, type WritingActivity, type InsertWritingActivity,
   achievements, type Achievement, type InsertAchievement,
-  userAchievements, type UserAchievement, type InsertUserAchievement
+  userAchievements, type UserAchievement, type InsertUserAchievement,
+  userApiKeys, type UserApiKey, type InsertUserApiKey,
+  usageEvents, type UsageEvent, type InsertUsageEvent,
+  bookBibles, type BookBible, type InsertBookBible,
+  steeringNotes, type SteeringNote, type InsertSteeringNote,
+  generations, type Generation, type InsertGeneration
 } from "@shared/schema";
 import { db, useDatabase } from "./db";
 import { eq, desc, and, sql, asc, gte, lte } from "drizzle-orm";
@@ -71,6 +76,63 @@ export interface IStorage {
   getUserAchievements(userId: number): Promise<(UserAchievement & { achievement: Achievement })[]>;
   addUserAchievement(userAchievement: InsertUserAchievement): Promise<UserAchievement>;
   checkAndAwardAchievements(userId: number): Promise<(UserAchievement & { achievement: Achievement })[]>;
+
+  // BYOK API key operations (encryptedKey is base64-encoded ciphertext, never plaintext)
+  listUserApiKeys(userId: number): Promise<UserApiKey[]>;
+  getUserApiKey(id: number, userId: number): Promise<UserApiKey | undefined>;
+  getActiveUserApiKeyForProvider(userId: number, provider: string): Promise<UserApiKey | undefined>;
+  createUserApiKey(input: {
+    userId: number;
+    provider: UserApiKey["provider"];
+    label: string;
+    encryptedKey: string;
+    keyPreview: string;
+    baseUrl?: string | null;
+    defaultModel?: string | null;
+    isActive?: boolean;
+  }): Promise<UserApiKey>;
+  updateUserApiKey(
+    id: number,
+    userId: number,
+    patch: Partial<{
+      label: string;
+      encryptedKey: string;
+      keyPreview: string;
+      baseUrl: string | null;
+      defaultModel: string | null;
+      isActive: boolean;
+    }>,
+  ): Promise<UserApiKey | undefined>;
+  deleteUserApiKey(id: number, userId: number): Promise<boolean>;
+  touchUserApiKey(id: number): Promise<void>;
+
+  // Usage event operations
+  createUsageEvent(event: InsertUsageEvent): Promise<UsageEvent>;
+  listUsageEvents(userId: number, limit?: number): Promise<UsageEvent[]>;
+  getMonthlyPlatformUsage(userId: number): Promise<number>;
+  getUsageSummary(userId: number): Promise<{
+    monthMicroCents: number;
+    totalTokens: number;
+    callCount: number;
+    byProvider: { provider: string; tokens: number; costMicroCents: number; calls: number }[];
+  }>;
+
+  // Book bible (story context) operations
+  getBookBible(bookId: number): Promise<BookBible | undefined>;
+  upsertBookBible(input: InsertBookBible): Promise<BookBible>;
+  updateBookBible(bookId: number, patch: Partial<InsertBookBible>): Promise<BookBible | undefined>;
+
+  // Steering notes operations
+  listSteeringNotes(bookId: number, opts?: { activeOnly?: boolean; chapterId?: number | null }): Promise<SteeringNote[]>;
+  createSteeringNote(note: InsertSteeringNote): Promise<SteeringNote>;
+  updateSteeringNote(id: number, patch: Partial<InsertSteeringNote>): Promise<SteeringNote | undefined>;
+  deleteSteeringNote(id: number): Promise<boolean>;
+
+  // Generation (version history) operations
+  createGeneration(gen: InsertGeneration): Promise<Generation>;
+  updateGeneration(id: number, patch: Partial<InsertGeneration>): Promise<Generation | undefined>;
+  listGenerations(filter: { userId: number; bookId?: number; chapterId?: number; kind?: Generation["kind"]; limit?: number }): Promise<Generation[]>;
+  getGeneration(id: number, userId: number): Promise<Generation | undefined>;
 }
 
 export class DatabaseStorage implements IStorage {
@@ -546,6 +608,304 @@ export class DatabaseStorage implements IStorage {
       totalWords
     };
   }
+
+  // ───────────────────────────────────────────────────────────────────────────
+  // BYOK API keys
+  // ───────────────────────────────────────────────────────────────────────────
+  async listUserApiKeys(userId: number): Promise<UserApiKey[]> {
+    return await db
+      .select()
+      .from(userApiKeys)
+      .where(eq(userApiKeys.userId, userId))
+      .orderBy(desc(userApiKeys.updatedAt));
+  }
+
+  async getUserApiKey(id: number, userId: number): Promise<UserApiKey | undefined> {
+    const [row] = await db
+      .select()
+      .from(userApiKeys)
+      .where(and(eq(userApiKeys.id, id), eq(userApiKeys.userId, userId)));
+    return row;
+  }
+
+  async getActiveUserApiKeyForProvider(
+    userId: number,
+    provider: string,
+  ): Promise<UserApiKey | undefined> {
+    const [row] = await db
+      .select()
+      .from(userApiKeys)
+      .where(
+        and(
+          eq(userApiKeys.userId, userId),
+          eq(userApiKeys.provider, provider as any),
+          eq(userApiKeys.isActive, true),
+        ),
+      )
+      .orderBy(desc(userApiKeys.lastUsedAt), desc(userApiKeys.updatedAt))
+      .limit(1);
+    return row;
+  }
+
+  async createUserApiKey(input: {
+    userId: number;
+    provider: UserApiKey["provider"];
+    label: string;
+    encryptedKey: string;
+    keyPreview: string;
+    baseUrl?: string | null;
+    defaultModel?: string | null;
+    isActive?: boolean;
+  }): Promise<UserApiKey> {
+    const [row] = await db
+      .insert(userApiKeys)
+      .values({
+        userId: input.userId,
+        provider: input.provider,
+        label: input.label,
+        encryptedKey: input.encryptedKey,
+        keyPreview: input.keyPreview,
+        baseUrl: input.baseUrl ?? null,
+        defaultModel: input.defaultModel ?? null,
+        isActive: input.isActive ?? true,
+      })
+      .returning();
+    return row;
+  }
+
+  async updateUserApiKey(
+    id: number,
+    userId: number,
+    patch: Partial<{
+      label: string;
+      encryptedKey: string;
+      keyPreview: string;
+      baseUrl: string | null;
+      defaultModel: string | null;
+      isActive: boolean;
+    }>,
+  ): Promise<UserApiKey | undefined> {
+    const [row] = await db
+      .update(userApiKeys)
+      .set({ ...patch, updatedAt: new Date() })
+      .where(and(eq(userApiKeys.id, id), eq(userApiKeys.userId, userId)))
+      .returning();
+    return row;
+  }
+
+  async deleteUserApiKey(id: number, userId: number): Promise<boolean> {
+    const result = await db
+      .delete(userApiKeys)
+      .where(and(eq(userApiKeys.id, id), eq(userApiKeys.userId, userId)));
+    return result !== undefined;
+  }
+
+  async touchUserApiKey(id: number): Promise<void> {
+    await db
+      .update(userApiKeys)
+      .set({ lastUsedAt: new Date() })
+      .where(eq(userApiKeys.id, id));
+  }
+
+  // ───────────────────────────────────────────────────────────────────────────
+  // Usage events
+  // ───────────────────────────────────────────────────────────────────────────
+  async createUsageEvent(event: InsertUsageEvent): Promise<UsageEvent> {
+    const [row] = await db.insert(usageEvents).values(event).returning();
+    return row;
+  }
+
+  async listUsageEvents(userId: number, limit = 100): Promise<UsageEvent[]> {
+    return await db
+      .select()
+      .from(usageEvents)
+      .where(eq(usageEvents.userId, userId))
+      .orderBy(desc(usageEvents.createdAt))
+      .limit(limit);
+  }
+
+  async getMonthlyPlatformUsage(userId: number): Promise<number> {
+    const now = new Date();
+    const start = new Date(now.getFullYear(), now.getMonth(), 1);
+    const [row] = await db
+      .select({
+        total: sql<number>`COALESCE(SUM(${usageEvents.costMicroCents}), 0)`,
+      })
+      .from(usageEvents)
+      .where(
+        and(
+          eq(usageEvents.userId, userId),
+          eq(usageEvents.mode, "platform"),
+          eq(usageEvents.success, true),
+          gte(usageEvents.createdAt, start),
+        ),
+      );
+    return Number(row?.total ?? 0);
+  }
+
+  async getUsageSummary(userId: number): Promise<{
+    monthMicroCents: number;
+    totalTokens: number;
+    callCount: number;
+    byProvider: { provider: string; tokens: number; costMicroCents: number; calls: number }[];
+  }> {
+    const now = new Date();
+    const start = new Date(now.getFullYear(), now.getMonth(), 1);
+
+    const [totals] = await db
+      .select({
+        cost: sql<number>`COALESCE(SUM(${usageEvents.costMicroCents}), 0)`,
+        tokens: sql<number>`COALESCE(SUM(${usageEvents.totalTokens}), 0)`,
+        calls: sql<number>`COUNT(*)`,
+      })
+      .from(usageEvents)
+      .where(and(eq(usageEvents.userId, userId), gte(usageEvents.createdAt, start)));
+
+    const byProvider = await db
+      .select({
+        provider: usageEvents.provider,
+        tokens: sql<number>`COALESCE(SUM(${usageEvents.totalTokens}), 0)`,
+        costMicroCents: sql<number>`COALESCE(SUM(${usageEvents.costMicroCents}), 0)`,
+        calls: sql<number>`COUNT(*)`,
+      })
+      .from(usageEvents)
+      .where(and(eq(usageEvents.userId, userId), gte(usageEvents.createdAt, start)))
+      .groupBy(usageEvents.provider);
+
+    return {
+      monthMicroCents: Number(totals?.cost ?? 0),
+      totalTokens: Number(totals?.tokens ?? 0),
+      callCount: Number(totals?.calls ?? 0),
+      byProvider: byProvider.map((r: { provider: unknown; tokens: unknown; costMicroCents: unknown; calls: unknown }) => ({
+        provider: String(r.provider),
+        tokens: Number(r.tokens),
+        costMicroCents: Number(r.costMicroCents),
+        calls: Number(r.calls),
+      })),
+    };
+  }
+
+  // ───────────────────────────────────────────────────────────────────────────
+  // Story bible
+  // ───────────────────────────────────────────────────────────────────────────
+  async getBookBible(bookId: number): Promise<BookBible | undefined> {
+    const [row] = await db.select().from(bookBibles).where(eq(bookBibles.bookId, bookId));
+    return row;
+  }
+
+  async upsertBookBible(input: InsertBookBible): Promise<BookBible> {
+    const existing = await this.getBookBible(input.bookId);
+    if (existing) {
+      const [row] = await db
+        .update(bookBibles)
+        .set({ ...input, updatedAt: new Date() })
+        .where(eq(bookBibles.id, existing.id))
+        .returning();
+      return row;
+    }
+    const [row] = await db.insert(bookBibles).values(input).returning();
+    return row;
+  }
+
+  async updateBookBible(
+    bookId: number,
+    patch: Partial<InsertBookBible>,
+  ): Promise<BookBible | undefined> {
+    const [row] = await db
+      .update(bookBibles)
+      .set({ ...patch, updatedAt: new Date() })
+      .where(eq(bookBibles.bookId, bookId))
+      .returning();
+    return row;
+  }
+
+  // ───────────────────────────────────────────────────────────────────────────
+  // Steering notes
+  // ───────────────────────────────────────────────────────────────────────────
+  async listSteeringNotes(
+    bookId: number,
+    opts?: { activeOnly?: boolean; chapterId?: number | null },
+  ): Promise<SteeringNote[]> {
+    const conditions = [eq(steeringNotes.bookId, bookId)];
+    if (opts?.activeOnly) conditions.push(eq(steeringNotes.isActive, true));
+    if (opts?.chapterId !== undefined && opts.chapterId !== null) {
+      conditions.push(eq(steeringNotes.chapterId, opts.chapterId));
+    }
+    return await db
+      .select()
+      .from(steeringNotes)
+      .where(and(...conditions))
+      .orderBy(desc(steeringNotes.priority), desc(steeringNotes.createdAt));
+  }
+
+  async createSteeringNote(note: InsertSteeringNote): Promise<SteeringNote> {
+    const [row] = await db.insert(steeringNotes).values(note).returning();
+    return row;
+  }
+
+  async updateSteeringNote(
+    id: number,
+    patch: Partial<InsertSteeringNote>,
+  ): Promise<SteeringNote | undefined> {
+    const [row] = await db
+      .update(steeringNotes)
+      .set({ ...patch, updatedAt: new Date() })
+      .where(eq(steeringNotes.id, id))
+      .returning();
+    return row;
+  }
+
+  async deleteSteeringNote(id: number): Promise<boolean> {
+    const r = await db.delete(steeringNotes).where(eq(steeringNotes.id, id));
+    return r !== undefined;
+  }
+
+  // ───────────────────────────────────────────────────────────────────────────
+  // Generations (version history)
+  // ───────────────────────────────────────────────────────────────────────────
+  async createGeneration(gen: InsertGeneration): Promise<Generation> {
+    const [row] = await db.insert(generations).values(gen).returning();
+    return row;
+  }
+
+  async updateGeneration(
+    id: number,
+    patch: Partial<InsertGeneration>,
+  ): Promise<Generation | undefined> {
+    const [row] = await db
+      .update(generations)
+      .set(patch)
+      .where(eq(generations.id, id))
+      .returning();
+    return row;
+  }
+
+  async listGenerations(filter: {
+    userId: number;
+    bookId?: number;
+    chapterId?: number;
+    kind?: Generation["kind"];
+    limit?: number;
+  }): Promise<Generation[]> {
+    const conds = [eq(generations.userId, filter.userId)];
+    if (filter.bookId) conds.push(eq(generations.bookId, filter.bookId));
+    if (filter.chapterId) conds.push(eq(generations.chapterId, filter.chapterId));
+    if (filter.kind) conds.push(eq(generations.kind, filter.kind));
+    return await db
+      .select()
+      .from(generations)
+      .where(and(...conds))
+      .orderBy(desc(generations.createdAt))
+      .limit(filter.limit ?? 50);
+  }
+
+  async getGeneration(id: number, userId: number): Promise<Generation | undefined> {
+    const [row] = await db
+      .select()
+      .from(generations)
+      .where(and(eq(generations.id, id), eq(generations.userId, userId)));
+    return row;
+  }
 }
 
 // Memory storage implementation for when database is not available
@@ -560,7 +920,12 @@ export class MemStorage implements IStorage {
   private writingActivities: WritingActivity[] = [];
   private achievements: Achievement[] = [];
   private userAchievements: UserAchievement[] = [];
-  
+  private userApiKeys: UserApiKey[] = [];
+  private usageEvents: UsageEvent[] = [];
+  private bookBibles: BookBible[] = [];
+  private steeringNotes: SteeringNote[] = [];
+  private generations: Generation[] = [];
+
   // Counters for IDs
   private userId = 1;
   private bookId = 1;
@@ -572,6 +937,11 @@ export class MemStorage implements IStorage {
   private writingActivityId = 1;
   private achievementId = 1;
   private userAchievementId = 1;
+  private userApiKeyId = 1;
+  private usageEventId = 1;
+  private bookBibleId = 1;
+  private steeringNoteId = 1;
+  private generationId = 1;
   
   // User operations
   async getUser(id: number): Promise<User | undefined> {
@@ -782,13 +1152,17 @@ export class MemStorage implements IStorage {
       model: settings.model || "deepseek",
       customModelUrl: settings.customModelUrl || null,
       apiKey: settings.apiKey || null,
-      temperature: settings.temperature || 700,
-      maxTokens: settings.maxTokens || 4096,
-      topP: settings.topP || 950,
-      presencePenalty: settings.presencePenalty || 200,
-      isDefault: settings.isDefault || false,
+      provider: settings.provider ?? null,
+      modelId: settings.modelId ?? null,
+      temperature: settings.temperature ?? 700,
+      maxTokens: settings.maxTokens ?? 4096,
+      topP: settings.topP ?? 950,
+      presencePenalty: settings.presencePenalty ?? 200,
+      writingStyle: settings.writingStyle ?? "descriptive",
+      creativityLevel: settings.creativityLevel ?? 500,
+      isDefault: settings.isDefault ?? false,
       createdAt: new Date(),
-      updatedAt: new Date()
+      updatedAt: new Date(),
     };
     this.llmSettings.push(newSettings);
     return newSettings;
@@ -1103,6 +1477,346 @@ export class MemStorage implements IStorage {
     }
     
     return newlyEarnedAchievements;
+  }
+
+  // ───────────────────────────────────────────────────────────────────────────
+  // BYOK API keys (in-memory)
+  // ───────────────────────────────────────────────────────────────────────────
+  async listUserApiKeys(userId: number): Promise<UserApiKey[]> {
+    return this.userApiKeys
+      .filter((k) => k.userId === userId)
+      .sort((a, b) => b.updatedAt.getTime() - a.updatedAt.getTime());
+  }
+
+  async getUserApiKey(id: number, userId: number): Promise<UserApiKey | undefined> {
+    return this.userApiKeys.find((k) => k.id === id && k.userId === userId);
+  }
+
+  async getActiveUserApiKeyForProvider(
+    userId: number,
+    provider: string,
+  ): Promise<UserApiKey | undefined> {
+    return this.userApiKeys
+      .filter((k) => k.userId === userId && k.provider === provider && k.isActive)
+      .sort((a, b) => {
+        const at = a.lastUsedAt?.getTime() ?? 0;
+        const bt = b.lastUsedAt?.getTime() ?? 0;
+        if (at !== bt) return bt - at;
+        return b.updatedAt.getTime() - a.updatedAt.getTime();
+      })[0];
+  }
+
+  async createUserApiKey(input: {
+    userId: number;
+    provider: UserApiKey["provider"];
+    label: string;
+    encryptedKey: string;
+    keyPreview: string;
+    baseUrl?: string | null;
+    defaultModel?: string | null;
+    isActive?: boolean;
+  }): Promise<UserApiKey> {
+    const row: UserApiKey = {
+      id: this.userApiKeyId++,
+      userId: input.userId,
+      provider: input.provider,
+      label: input.label,
+      encryptedKey: input.encryptedKey,
+      keyPreview: input.keyPreview,
+      baseUrl: input.baseUrl ?? null,
+      defaultModel: input.defaultModel ?? null,
+      isActive: input.isActive ?? true,
+      lastUsedAt: null,
+      createdAt: new Date(),
+      updatedAt: new Date(),
+    };
+    this.userApiKeys.push(row);
+    return row;
+  }
+
+  async updateUserApiKey(
+    id: number,
+    userId: number,
+    patch: Partial<{
+      label: string;
+      encryptedKey: string;
+      keyPreview: string;
+      baseUrl: string | null;
+      defaultModel: string | null;
+      isActive: boolean;
+    }>,
+  ): Promise<UserApiKey | undefined> {
+    const idx = this.userApiKeys.findIndex((k) => k.id === id && k.userId === userId);
+    if (idx === -1) return undefined;
+    const updated: UserApiKey = {
+      ...this.userApiKeys[idx],
+      ...patch,
+      updatedAt: new Date(),
+    };
+    this.userApiKeys[idx] = updated;
+    return updated;
+  }
+
+  async deleteUserApiKey(id: number, userId: number): Promise<boolean> {
+    const idx = this.userApiKeys.findIndex((k) => k.id === id && k.userId === userId);
+    if (idx === -1) return false;
+    this.userApiKeys.splice(idx, 1);
+    return true;
+  }
+
+  async touchUserApiKey(id: number): Promise<void> {
+    const idx = this.userApiKeys.findIndex((k) => k.id === id);
+    if (idx === -1) return;
+    this.userApiKeys[idx].lastUsedAt = new Date();
+  }
+
+  // ───────────────────────────────────────────────────────────────────────────
+  // Usage events (in-memory)
+  // ───────────────────────────────────────────────────────────────────────────
+  async createUsageEvent(event: InsertUsageEvent): Promise<UsageEvent> {
+    const row: UsageEvent = {
+      id: this.usageEventId++,
+      userId: event.userId,
+      apiKeyId: event.apiKeyId ?? null,
+      provider: event.provider,
+      model: event.model,
+      mode: event.mode,
+      feature: event.feature ?? null,
+      bookId: event.bookId ?? null,
+      chapterId: event.chapterId ?? null,
+      promptTokens: event.promptTokens ?? 0,
+      completionTokens: event.completionTokens ?? 0,
+      totalTokens: event.totalTokens ?? 0,
+      costMicroCents: event.costMicroCents ?? 0,
+      durationMs: event.durationMs ?? 0,
+      success: event.success ?? true,
+      errorMessage: event.errorMessage ?? null,
+      createdAt: new Date(),
+    };
+    this.usageEvents.push(row);
+    return row;
+  }
+
+  async listUsageEvents(userId: number, limit = 100): Promise<UsageEvent[]> {
+    return this.usageEvents
+      .filter((e) => e.userId === userId)
+      .sort((a, b) => b.createdAt.getTime() - a.createdAt.getTime())
+      .slice(0, limit);
+  }
+
+  async getMonthlyPlatformUsage(userId: number): Promise<number> {
+    const now = new Date();
+    const start = new Date(now.getFullYear(), now.getMonth(), 1);
+    return this.usageEvents
+      .filter(
+        (e) =>
+          e.userId === userId &&
+          e.mode === "platform" &&
+          e.success &&
+          e.createdAt >= start,
+      )
+      .reduce((sum, e) => sum + (e.costMicroCents || 0), 0);
+  }
+
+  async getUsageSummary(userId: number) {
+    const now = new Date();
+    const start = new Date(now.getFullYear(), now.getMonth(), 1);
+    const events = this.usageEvents.filter((e) => e.userId === userId && e.createdAt >= start);
+    const byProviderMap = new Map<string, { tokens: number; costMicroCents: number; calls: number }>();
+    let monthMicroCents = 0;
+    let totalTokens = 0;
+    for (const e of events) {
+      monthMicroCents += e.costMicroCents || 0;
+      totalTokens += e.totalTokens || 0;
+      const cur = byProviderMap.get(e.provider) || { tokens: 0, costMicroCents: 0, calls: 0 };
+      cur.tokens += e.totalTokens || 0;
+      cur.costMicroCents += e.costMicroCents || 0;
+      cur.calls += 1;
+      byProviderMap.set(e.provider, cur);
+    }
+    return {
+      monthMicroCents,
+      totalTokens,
+      callCount: events.length,
+      byProvider: Array.from(byProviderMap.entries()).map(([provider, v]) => ({ provider, ...v })),
+    };
+  }
+
+  // ───────────────────────────────────────────────────────────────────────────
+  // Story bible (in-memory)
+  // ───────────────────────────────────────────────────────────────────────────
+  async getBookBible(bookId: number): Promise<BookBible | undefined> {
+    return this.bookBibles.find((b) => b.bookId === bookId);
+  }
+
+  async upsertBookBible(input: InsertBookBible): Promise<BookBible> {
+    const existing = await this.getBookBible(input.bookId);
+    if (existing) {
+      const updated: BookBible = {
+        ...existing,
+        ...input,
+        entities: (input.entities ?? existing.entities) as any,
+        updatedAt: new Date(),
+      };
+      const idx = this.bookBibles.findIndex((b) => b.id === existing.id);
+      this.bookBibles[idx] = updated;
+      return updated;
+    }
+    const row: BookBible = {
+      id: this.bookBibleId++,
+      bookId: input.bookId,
+      premise: input.premise ?? null,
+      setting: input.setting ?? null,
+      themes: input.themes ?? null,
+      styleGuide: input.styleGuide ?? null,
+      glossary: input.glossary ?? null,
+      entities: (input.entities ?? {}) as any,
+      rollingSummary: input.rollingSummary ?? null,
+      language: input.language ?? "English",
+      createdAt: new Date(),
+      updatedAt: new Date(),
+    };
+    this.bookBibles.push(row);
+    return row;
+  }
+
+  async updateBookBible(
+    bookId: number,
+    patch: Partial<InsertBookBible>,
+  ): Promise<BookBible | undefined> {
+    const idx = this.bookBibles.findIndex((b) => b.bookId === bookId);
+    if (idx === -1) return undefined;
+    const updated: BookBible = {
+      ...this.bookBibles[idx],
+      ...patch,
+      entities: (patch.entities ?? this.bookBibles[idx].entities) as any,
+      updatedAt: new Date(),
+    };
+    this.bookBibles[idx] = updated;
+    return updated;
+  }
+
+  // ───────────────────────────────────────────────────────────────────────────
+  // Steering notes (in-memory)
+  // ───────────────────────────────────────────────────────────────────────────
+  async listSteeringNotes(
+    bookId: number,
+    opts?: { activeOnly?: boolean; chapterId?: number | null },
+  ): Promise<SteeringNote[]> {
+    return this.steeringNotes
+      .filter((n) => {
+        if (n.bookId !== bookId) return false;
+        if (opts?.activeOnly && !n.isActive) return false;
+        if (opts?.chapterId !== undefined && opts.chapterId !== null && n.chapterId !== opts.chapterId) {
+          return false;
+        }
+        return true;
+      })
+      .sort((a, b) => {
+        if (a.priority !== b.priority) return b.priority - a.priority;
+        return b.createdAt.getTime() - a.createdAt.getTime();
+      });
+  }
+
+  async createSteeringNote(note: InsertSteeringNote): Promise<SteeringNote> {
+    const row: SteeringNote = {
+      id: this.steeringNoteId++,
+      bookId: note.bookId,
+      chapterId: note.chapterId ?? null,
+      scope: note.scope ?? "book",
+      note: note.note,
+      isActive: note.isActive ?? true,
+      priority: note.priority ?? 0,
+      createdAt: new Date(),
+      updatedAt: new Date(),
+    };
+    this.steeringNotes.push(row);
+    return row;
+  }
+
+  async updateSteeringNote(
+    id: number,
+    patch: Partial<InsertSteeringNote>,
+  ): Promise<SteeringNote | undefined> {
+    const idx = this.steeringNotes.findIndex((n) => n.id === id);
+    if (idx === -1) return undefined;
+    const updated: SteeringNote = {
+      ...this.steeringNotes[idx],
+      ...patch,
+      updatedAt: new Date(),
+    };
+    this.steeringNotes[idx] = updated;
+    return updated;
+  }
+
+  async deleteSteeringNote(id: number): Promise<boolean> {
+    const idx = this.steeringNotes.findIndex((n) => n.id === id);
+    if (idx === -1) return false;
+    this.steeringNotes.splice(idx, 1);
+    return true;
+  }
+
+  // ───────────────────────────────────────────────────────────────────────────
+  // Generations / version history (in-memory)
+  // ───────────────────────────────────────────────────────────────────────────
+  async createGeneration(gen: InsertGeneration): Promise<Generation> {
+    const row: Generation = {
+      id: this.generationId++,
+      userId: gen.userId,
+      bookId: gen.bookId ?? null,
+      chapterId: gen.chapterId ?? null,
+      kind: gen.kind,
+      status: gen.status ?? "pending",
+      provider: gen.provider,
+      model: gen.model,
+      mode: gen.mode,
+      prompt: (gen.prompt ?? []) as any,
+      output: gen.output ?? "",
+      promptTokens: gen.promptTokens ?? 0,
+      completionTokens: gen.completionTokens ?? 0,
+      totalTokens: gen.totalTokens ?? 0,
+      costMicroCents: gen.costMicroCents ?? 0,
+      durationMs: gen.durationMs ?? 0,
+      errorMessage: gen.errorMessage ?? null,
+      metadata: (gen.metadata ?? {}) as any,
+      createdAt: new Date(),
+    };
+    this.generations.push(row);
+    return row;
+  }
+
+  async updateGeneration(
+    id: number,
+    patch: Partial<InsertGeneration>,
+  ): Promise<Generation | undefined> {
+    const idx = this.generations.findIndex((g) => g.id === id);
+    if (idx === -1) return undefined;
+    const updated: Generation = { ...this.generations[idx], ...(patch as any) };
+    this.generations[idx] = updated;
+    return updated;
+  }
+
+  async listGenerations(filter: {
+    userId: number;
+    bookId?: number;
+    chapterId?: number;
+    kind?: Generation["kind"];
+    limit?: number;
+  }): Promise<Generation[]> {
+    return this.generations
+      .filter((g) => {
+        if (g.userId !== filter.userId) return false;
+        if (filter.bookId && g.bookId !== filter.bookId) return false;
+        if (filter.chapterId && g.chapterId !== filter.chapterId) return false;
+        if (filter.kind && g.kind !== filter.kind) return false;
+        return true;
+      })
+      .sort((a, b) => b.createdAt.getTime() - a.createdAt.getTime())
+      .slice(0, filter.limit ?? 50);
+  }
+
+  async getGeneration(id: number, userId: number): Promise<Generation | undefined> {
+    return this.generations.find((g) => g.id === id && g.userId === userId);
   }
 }
 
