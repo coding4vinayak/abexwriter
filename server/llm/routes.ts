@@ -28,6 +28,14 @@ import {
   type StoryContext,
 } from "./prompts";
 import {
+  buildHumanizePrompt,
+  cleanHumanizerOutput,
+  humanizerDiffStats,
+  ALL_PASSES,
+  PASS_LABELS,
+  type HumanizerPass,
+} from "./humanize";
+import {
   insertUserApiKeySchema,
   insertSteeringNoteSchema,
   insertBookBibleSchema,
@@ -735,6 +743,119 @@ export function registerLlmRoutes(app: Express): void {
       });
 
       res.json({ text: result.text, generationId: generation.id, usage: result });
+    } catch (err: any) {
+      if (err instanceof z.ZodError) return res.status(400).json({ error: err.errors });
+      if (err instanceof QuotaExceededError) {
+        return res.status(402).json({ error: err.message, used: err.used, limit: err.limit });
+      }
+      const { status, message } = errorToHttpStatus(err);
+      res.status(status).json({ error: message });
+    }
+  });
+
+  // ───────────────────────────────────────────────────────────────────────
+  // Humanizer — anti-AI-slop rewrite with intensity meter
+  // ───────────────────────────────────────────────────────────────────────
+  app.get("/api/humanize/options", (_req, res) => {
+    res.json({
+      passes: ALL_PASSES.map((id) => ({ id, ...PASS_LABELS[id] })),
+    });
+  });
+
+  app.post("/api/humanize", async (req, res) => {
+    try {
+      const userId = getUserId(req);
+      const body = z
+        .object({
+          text: z.string().min(20, "Need at least 20 characters of prose to humanize"),
+          intensity: z.number().min(0).max(100).default(50),
+          passes: z.array(z.string()).default([...ALL_PASSES]),
+          provider: z.string().min(1),
+          model: z.string().min(1),
+          mode: z.enum(["byok", "platform"]).default("byok"),
+          apiKeyId: z.number().int().optional(),
+          bookId: z.number().int().optional(),
+          chapterId: z.number().int().optional(),
+          language: z.string().optional(),
+          customNote: z.string().optional(),
+          temperature: z.number().min(0).max(2).optional(),
+        })
+        .parse(req.body);
+
+      // Validate pass IDs.
+      const validPasses = body.passes.filter((p): p is HumanizerPass =>
+        (ALL_PASSES as string[]).includes(p),
+      );
+      if (validPasses.length === 0) {
+        return res.status(400).json({ error: "Pick at least one humanization pass." });
+      }
+
+      if (body.mode === "platform") await assertWithinPlatformQuota(userId, "platform");
+
+      const ctx = body.bookId ? await loadStoryContext(body.bookId, body.chapterId) : undefined;
+      const messages = buildHumanizePrompt({
+        text: body.text,
+        intensity: body.intensity,
+        passes: validPasses,
+        language: body.language,
+        storyContext: ctx,
+        customNote: body.customNote,
+      });
+
+      // Intensity also nudges sampling temperature so "light touch" stays
+      // conservative and "full revoicing" can take more risks.
+      const temperature =
+        body.temperature ?? Math.min(0.9, 0.4 + (body.intensity / 100) * 0.4);
+
+      const result = await generateChat({
+        userId,
+        providerId: body.provider as ProviderId,
+        mode: body.mode,
+        apiKeyId: body.apiKeyId,
+        model: body.model,
+        messages,
+        temperature,
+        // Allow output to be longer than input by ~20% in case the model
+        // adds sensory beats; cap at 16k for cost safety.
+        maxTokens: Math.min(16_000, Math.max(2000, Math.round((body.text.length / 3) * 1.4))),
+        feature: "humanize",
+        bookId: body.bookId,
+        chapterId: body.chapterId,
+      });
+
+      const cleaned = cleanHumanizerOutput(result.text);
+      const stats = humanizerDiffStats(body.text, cleaned);
+
+      const generation = await storage.createGeneration({
+        userId,
+        bookId: body.bookId ?? null,
+        chapterId: body.chapterId ?? null,
+        kind: "rewrite",
+        status: "completed",
+        provider: body.provider as any,
+        model: body.model,
+        mode: body.mode,
+        prompt: messages as any,
+        output: cleaned,
+        promptTokens: result.promptTokens,
+        completionTokens: result.completionTokens,
+        totalTokens: result.totalTokens,
+        costMicroCents: result.costMicroCents,
+        durationMs: result.durationMs,
+        metadata: {
+          humanizer: true,
+          intensity: body.intensity,
+          passes: validPasses,
+          stats,
+        } as any,
+      });
+
+      res.json({
+        text: cleaned,
+        generationId: generation.id,
+        stats,
+        usage: result,
+      });
     } catch (err: any) {
       if (err instanceof z.ZodError) return res.status(400).json({ error: err.errors });
       if (err instanceof QuotaExceededError) {

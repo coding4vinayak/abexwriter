@@ -7,6 +7,7 @@ import EditorToolbar from "@/components/editor/EditorToolbar";
 import SteeringPanel from "@/components/SteeringPanel";
 import VersionHistory from "@/components/VersionHistory";
 import GenerateChapterDialog from "@/components/GenerateChapterDialog";
+import HumanizeDialog from "@/components/HumanizeDialog";
 import { apiRequest, queryClient } from "@/lib/queryClient";
 import type { Book, Chapter } from "@shared/schema";
 import { Button } from "@/components/ui/button";
@@ -25,6 +26,7 @@ export default function Editor() {
   const [steeringOpen, setSteeringOpen] = useState(false);
   const [versionsOpen, setVersionsOpen] = useState(false);
   const [generateOpen, setGenerateOpen] = useState(false);
+  const [humanizeOpen, setHumanizeOpen] = useState(false);
 
   // Fetch book data
   const { data: book, isLoading: isLoadingBook } = useQuery({
@@ -265,6 +267,10 @@ export default function Editor() {
           }}
           onOpenSteering={() => setSteeringOpen(true)}
           onOpenVersions={() => setVersionsOpen(true)}
+          onHumanize={() => {
+            if (!activeChapter || !content.trim()) return;
+            setHumanizeOpen(true);
+          }}
           isSaving={isSaving}
         />
 
@@ -337,6 +343,20 @@ export default function Editor() {
           chapterTitle={activeChapter.title}
           chapterOutline={activeChapter.outline ?? ""}
           onGenerated={handleGenerated}
+        />
+      )}
+      {book && activeChapter && (
+        <HumanizeDialog
+          open={humanizeOpen}
+          onOpenChange={setHumanizeOpen}
+          initialText={content}
+          bookId={book.id}
+          chapterId={activeChapter.id}
+          onAccept={(text, _genId) => {
+            setContent(text);
+            setIsSaving(true);
+            saveChapterMutation.mutate({ id: activeChapter.id, content: text });
+          }}
         />
       )}
     </div>

@@ -11,6 +11,7 @@ import {
   BookOpen,
   Compass,
   History,
+  Sparkles,
 } from "lucide-react";
 import type { Chapter } from "@shared/schema";
 
@@ -21,6 +22,7 @@ interface EditorToolbarProps {
   onSave: () => void;
   onAutoEdit: () => void;
   onGenerateContent: () => void;
+  onHumanize?: () => void;
   onOpenSteering?: () => void;
   onOpenVersions?: () => void;
 }
@@ -32,6 +34,7 @@ export default function EditorToolbar({
   onSave,
   onAutoEdit,
   onGenerateContent,
+  onHumanize,
   onOpenSteering,
   onOpenVersions,
 }: EditorToolbarProps) {
@@ -90,6 +93,18 @@ export default function EditorToolbar({
             <Button variant="outline" size="sm" onClick={onGenerateContent}>
               <Wand2 className="h-4 w-4 mr-1.5" /> AI Generate
             </Button>
+
+            {onHumanize && (
+              <Button
+                variant="outline"
+                size="sm"
+                onClick={onHumanize}
+                title="Strip AI-slop and add human voice"
+              >
+                <Sparkles className="h-4 w-4 mr-1.5" />
+                <span className="hidden md:inline">Humanize</span>
+              </Button>
+            )}
 
             <Button
               variant="default"
