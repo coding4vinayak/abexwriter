@@ -8,6 +8,7 @@ import { useState, useEffect } from "react";
 import Dashboard from "@/pages/Dashboard";
 import Projects from "@/pages/Projects";
 import Settings from "@/pages/Settings";
+import ApiKeys from "@/pages/ApiKeys";
 import DatabaseConfig from "@/pages/DatabaseConfig";
 import ImportExport from "@/pages/ImportExport";
 import Editor from "@/pages/Editor";
@@ -23,6 +24,7 @@ function Router() {
       <Route path="/" component={Dashboard} />
       <Route path="/projects" component={Projects} />
       <Route path="/settings" component={Settings} />
+      <Route path="/api-keys" component={ApiKeys} />
       <Route path="/database" component={DatabaseConfig} />
       <Route path="/import" component={ImportExport} />
       <Route path="/generate" component={BookGeneration} />

@@ -1,7 +1,7 @@
 import { pgTable, text, serial, integer, boolean, timestamp, pgEnum, jsonb, date } from "drizzle-orm/pg-core";
 import { createInsertSchema } from "drizzle-zod";
 import { z } from "zod";
-import { relations } from "drizzle-orm";
+import { relations, sql } from "drizzle-orm";
 
 // User schema
 export const users = pgTable("users", {
@@ -18,7 +18,7 @@ export const insertUserSchema = createInsertSchema(users).pick({
 export type InsertUser = z.infer<typeof insertUserSchema>;
 export type User = typeof users.$inferSelect;
 
-// LLM Model type enum
+// LLM Model type enum (legacy — kept for backward compatibility with existing rows)
 export const llmModelEnum = pgEnum("llm_model", [
   "deepseek",
   "llama",
@@ -29,6 +29,29 @@ export const llmModelEnum = pgEnum("llm_model", [
   "perplexity",
   "custom"
 ]);
+
+// Provider enum — the canonical list of supported LLM providers.
+// All "openai-compatible" providers can be invoked through the same /v1/chat/completions
+// client; anthropic and gemini have their own native protocols.
+export const providerEnum = pgEnum("llm_provider", [
+  "openai",
+  "anthropic",
+  "deepseek",
+  "groq",
+  "together",
+  "openrouter",
+  "mistral",
+  "perplexity",
+  "xai",
+  "fireworks",
+  "anyscale",
+  "gemini",
+  "ollama",
+  "custom"
+]);
+
+// Mode for an LLM call: BYOK (user-supplied key) or platform (server-managed key with quota).
+export const llmModeEnum = pgEnum("llm_mode", ["byok", "platform"]);
 
 // Book status enum
 export const bookStatusEnum = pgEnum("book_status", [
@@ -57,19 +80,27 @@ export const writingStyleEnum = pgEnum("writing_style", [
   "humorous"
 ]);
 
-// LLM Settings
+// LLM Settings — generation presets (temperature, max tokens, etc.)
+// `provider` + `modelId` (text) are the new canonical fields. The legacy `model` enum
+// and plaintext `apiKey` columns are kept for backward compatibility but should not be
+// used by new code. API keys now live in `userApiKeys` (encrypted).
 export const llmSettings = pgTable("llm_settings", {
   id: serial("id").primaryKey(),
   name: text("name").notNull().default("Default Settings"),
+  // Legacy fields (deprecated — use provider/modelId instead).
   model: llmModelEnum("model").notNull().default("deepseek"),
-  customModelUrl: text("custom_model_url"),
   apiKey: text("api_key"),
-  temperature: integer("temperature").notNull().default(700), // Store as integer (x1000)
+  // New canonical fields.
+  provider: providerEnum("provider"),
+  modelId: text("model_id"), // e.g. "gpt-4o-mini", "claude-3-5-sonnet-20241022", "deepseek-chat"
+  customModelUrl: text("custom_model_url"),
+  // Generation parameters (stored as integers x1000 for precision, e.g. 700 = 0.7).
+  temperature: integer("temperature").notNull().default(700),
   maxTokens: integer("max_tokens").notNull().default(4096),
-  topP: integer("top_p").notNull().default(950), // Store as integer (x1000)
-  presencePenalty: integer("presence_penalty").notNull().default(200), // Store as integer (x1000)
+  topP: integer("top_p").notNull().default(950),
+  presencePenalty: integer("presence_penalty").notNull().default(200),
   writingStyle: writingStyleEnum("writing_style").notNull().default("descriptive"),
-  creativityLevel: integer("creativity_level").notNull().default(500), // Store as integer (x1000)
+  creativityLevel: integer("creativity_level").notNull().default(500),
   isDefault: boolean("is_default").notNull().default(false),
   createdAt: timestamp("created_at").notNull().defaultNow(),
   updatedAt: timestamp("updated_at").notNull().defaultNow(),
@@ -340,3 +371,244 @@ export const insertUserAchievementSchema = createInsertSchema(userAchievements).
 
 export type InsertUserAchievement = z.infer<typeof insertUserAchievementSchema>;
 export type UserAchievement = typeof userAchievements.$inferSelect;
+
+
+
+// ─────────────────────────────────────────────────────────────────────────────
+// LLM provider API keys (BYOK — Bring Your Own Key).
+// Keys are encrypted at rest with AES-256-GCM. The plaintext key never leaves
+// the server-side `decryptApiKey()` helper. The API never returns the
+// plaintext key — only a redacted preview (first 4 + last 4 chars).
+// ─────────────────────────────────────────────────────────────────────────────
+export const userApiKeys = pgTable("user_api_keys", {
+  id: serial("id").primaryKey(),
+  userId: integer("user_id").notNull().references(() => users.id, { onDelete: "cascade" }),
+  provider: providerEnum("provider").notNull(),
+  label: text("label").notNull().default("Default"),
+  encryptedKey: text("encrypted_key").notNull(),
+  keyPreview: text("key_preview").notNull(), // e.g. "sk-…abcd"
+  // Optional override for OpenAI-compatible endpoints (required when provider="custom").
+  baseUrl: text("base_url"),
+  // Optional preferred default model for this key, e.g. "gpt-4o-mini".
+  defaultModel: text("default_model"),
+  isActive: boolean("is_active").notNull().default(true),
+  lastUsedAt: timestamp("last_used_at"),
+  createdAt: timestamp("created_at").notNull().defaultNow(),
+  updatedAt: timestamp("updated_at").notNull().defaultNow(),
+});
+
+export const userApiKeysRelations = relations(userApiKeys, ({ one }) => ({
+  user: one(users, {
+    fields: [userApiKeys.userId],
+    references: [users.id],
+  }),
+}));
+
+export const insertUserApiKeySchema = createInsertSchema(userApiKeys).omit({
+  id: true,
+  encryptedKey: true,
+  keyPreview: true,
+  lastUsedAt: true,
+  createdAt: true,
+  updatedAt: true,
+}).extend({
+  // The raw plaintext key is only accepted on input; it is never persisted plaintext.
+  apiKey: z.string().min(1, "API key is required"),
+});
+
+export type InsertUserApiKey = z.infer<typeof insertUserApiKeySchema>;
+export type UserApiKey = typeof userApiKeys.$inferSelect;
+
+// Public-safe shape returned by the API (no encryptedKey).
+export type UserApiKeyPublic = Omit<UserApiKey, "encryptedKey">;
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Usage events — every LLM call (success or failure) records a row here for
+// metering, billing, debugging and cost dashboards. Costs are stored as
+// micro-cents (1/100 of a cent) for precision; e.g. 250 micro-cents = $0.0025.
+// ─────────────────────────────────────────────────────────────────────────────
+export const usageEvents = pgTable("usage_events", {
+  id: serial("id").primaryKey(),
+  userId: integer("user_id").notNull().references(() => users.id, { onDelete: "cascade" }),
+  apiKeyId: integer("api_key_id").references(() => userApiKeys.id, { onDelete: "set null" }),
+  provider: providerEnum("provider").notNull(),
+  model: text("model").notNull(),
+  mode: llmModeEnum("mode").notNull(),
+  feature: text("feature"), // 'chapter_outline' | 'chapter_content' | 'rewrite' | 'expand' | 'test'
+  bookId: integer("book_id").references(() => books.id, { onDelete: "set null" }),
+  chapterId: integer("chapter_id").references(() => chapters.id, { onDelete: "set null" }),
+  promptTokens: integer("prompt_tokens").notNull().default(0),
+  completionTokens: integer("completion_tokens").notNull().default(0),
+  totalTokens: integer("total_tokens").notNull().default(0),
+  costMicroCents: integer("cost_micro_cents").notNull().default(0),
+  durationMs: integer("duration_ms").notNull().default(0),
+  success: boolean("success").notNull().default(true),
+  errorMessage: text("error_message"),
+  createdAt: timestamp("created_at").notNull().defaultNow(),
+});
+
+export const usageEventsRelations = relations(usageEvents, ({ one }) => ({
+  user: one(users, { fields: [usageEvents.userId], references: [users.id] }),
+  apiKey: one(userApiKeys, { fields: [usageEvents.apiKeyId], references: [userApiKeys.id] }),
+  book: one(books, { fields: [usageEvents.bookId], references: [books.id] }),
+  chapter: one(chapters, { fields: [usageEvents.chapterId], references: [chapters.id] }),
+}));
+
+export const insertUsageEventSchema = createInsertSchema(usageEvents).omit({
+  id: true,
+  createdAt: true,
+});
+
+export type InsertUsageEvent = z.infer<typeof insertUsageEventSchema>;
+export type UsageEvent = typeof usageEvents.$inferSelect;
+
+
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Story bible / book context — characters, places, plot threads, themes,
+// glossary, world rules. One row per book. Stored as a JSON blob so we can
+// iterate the schema without migrations during early development. Phase 2
+// will normalise this into per-entity tables (characters, locations, etc.)
+// with relationships and embeddings for RAG.
+// ─────────────────────────────────────────────────────────────────────────────
+export const bookBibles = pgTable("book_bibles", {
+  id: serial("id").primaryKey(),
+  bookId: integer("book_id").notNull().unique().references(() => books.id, { onDelete: "cascade" }),
+  // Free-form long-form notes the author wants the model to always remember.
+  premise: text("premise"),
+  setting: text("setting"),
+  themes: text("themes"),
+  styleGuide: text("style_guide"),
+  glossary: text("glossary"),
+  /**
+   * Structured entities. Shape:
+   * {
+   *   characters: [{ name, role, description, arc, voice, relationships: [{to, type}] }],
+   *   locations:  [{ name, description }],
+   *   plotThreads:[{ name, status, description }],
+   *   factions:   [{ name, description }],
+   *   rules:      [string]                     // e.g. "magic costs memory"
+   * }
+   */
+  entities: jsonb("entities").notNull().default(sql`'{}'::jsonb`),
+  /** Chapter-by-chapter rolling summary, populated as chapters are written. */
+  rollingSummary: text("rolling_summary"),
+  language: text("language").notNull().default("English"),
+  createdAt: timestamp("created_at").notNull().defaultNow(),
+  updatedAt: timestamp("updated_at").notNull().defaultNow(),
+});
+
+export const bookBiblesRelations = relations(bookBibles, ({ one }) => ({
+  book: one(books, { fields: [bookBibles.bookId], references: [books.id] }),
+}));
+
+export const insertBookBibleSchema = createInsertSchema(bookBibles).omit({
+  id: true,
+  createdAt: true,
+  updatedAt: true,
+});
+
+export type InsertBookBible = z.infer<typeof insertBookBibleSchema>;
+export type BookBible = typeof bookBibles.$inferSelect;
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Steering notes — author directives that persist across generations.
+// Examples: "kill off the king in chapter 14", "shift POV to Mira",
+// "tone down the violence going forward". These get injected into the system
+// prompt of every subsequent generation until the author marks them resolved.
+// ─────────────────────────────────────────────────────────────────────────────
+export const steeringScopeEnum = pgEnum("steering_scope", ["book", "chapter"]);
+
+export const steeringNotes = pgTable("steering_notes", {
+  id: serial("id").primaryKey(),
+  bookId: integer("book_id").notNull().references(() => books.id, { onDelete: "cascade" }),
+  chapterId: integer("chapter_id").references(() => chapters.id, { onDelete: "cascade" }),
+  scope: steeringScopeEnum("scope").notNull().default("book"),
+  note: text("note").notNull(),
+  isActive: boolean("is_active").notNull().default(true),
+  /** Higher number = higher priority when many notes are stacked. */
+  priority: integer("priority").notNull().default(0),
+  createdAt: timestamp("created_at").notNull().defaultNow(),
+  updatedAt: timestamp("updated_at").notNull().defaultNow(),
+});
+
+export const steeringNotesRelations = relations(steeringNotes, ({ one }) => ({
+  book: one(books, { fields: [steeringNotes.bookId], references: [books.id] }),
+  chapter: one(chapters, { fields: [steeringNotes.chapterId], references: [chapters.id] }),
+}));
+
+export const insertSteeringNoteSchema = createInsertSchema(steeringNotes).omit({
+  id: true,
+  createdAt: true,
+  updatedAt: true,
+});
+
+export type InsertSteeringNote = z.infer<typeof insertSteeringNoteSchema>;
+export type SteeringNote = typeof steeringNotes.$inferSelect;
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Generations — every LLM completion is persisted as a Generation row.
+// This *is* the version history: a chapter can have N generations; the user
+// picks one as "active" and applies it to the chapter content. Old versions
+// remain available for diff / rollback.
+// ─────────────────────────────────────────────────────────────────────────────
+export const generationKindEnum = pgEnum("generation_kind", [
+  "chapter_outline",
+  "chapter_content",
+  "rewrite",
+  "expand",
+  "shrink",
+  "describe",
+  "brainstorm",
+  "character",
+  "research",
+  "translation",
+  "custom",
+]);
+
+export const generationStatusEnum = pgEnum("generation_status", [
+  "pending",
+  "completed",
+  "failed",
+  "applied",       // user accepted this version into the chapter
+  "discarded",
+]);
+
+export const generations = pgTable("generations", {
+  id: serial("id").primaryKey(),
+  userId: integer("user_id").notNull().references(() => users.id, { onDelete: "cascade" }),
+  bookId: integer("book_id").references(() => books.id, { onDelete: "cascade" }),
+  chapterId: integer("chapter_id").references(() => chapters.id, { onDelete: "cascade" }),
+  kind: generationKindEnum("kind").notNull(),
+  status: generationStatusEnum("status").notNull().default("pending"),
+  provider: providerEnum("provider").notNull(),
+  model: text("model").notNull(),
+  mode: llmModeEnum("mode").notNull(),
+  /** The composed prompt messages actually sent to the model. */
+  prompt: jsonb("prompt").notNull().default(sql`'[]'::jsonb`),
+  /** Raw model output text. */
+  output: text("output").notNull().default(""),
+  promptTokens: integer("prompt_tokens").notNull().default(0),
+  completionTokens: integer("completion_tokens").notNull().default(0),
+  totalTokens: integer("total_tokens").notNull().default(0),
+  costMicroCents: integer("cost_micro_cents").notNull().default(0),
+  durationMs: integer("duration_ms").notNull().default(0),
+  errorMessage: text("error_message"),
+  /** Additional structured context: temperature, target word count, etc. */
+  metadata: jsonb("metadata").notNull().default(sql`'{}'::jsonb`),
+  createdAt: timestamp("created_at").notNull().defaultNow(),
+});
+
+export const generationsRelations = relations(generations, ({ one }) => ({
+  user: one(users, { fields: [generations.userId], references: [users.id] }),
+  book: one(books, { fields: [generations.bookId], references: [books.id] }),
+  chapter: one(chapters, { fields: [generations.chapterId], references: [chapters.id] }),
+}));
+
+export const insertGenerationSchema = createInsertSchema(generations).omit({
+  id: true,
+  createdAt: true,
+});
+
+export type InsertGeneration = z.infer<typeof insertGenerationSchema>;
+export type Generation = typeof generations.$inferSelect;
