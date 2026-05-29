@@ -141,7 +141,6 @@ async function loadStoryContext(bookId?: number, chapterId?: number): Promise<St
     ctx.themes = bible.themes ?? null;
     ctx.styleGuide = bible.styleGuide ?? null;
     ctx.glossary = bible.glossary ?? null;
-    ctx.rollingSummary = bible.rollingSummary ?? null;
     ctx.entities = (bible.entities ?? {}) as any;
     ctx.language = bible.language ?? null;
   }
@@ -151,12 +150,121 @@ async function loadStoryContext(bookId?: number, chapterId?: number): Promise<St
     ctx.steeringNotes = notes.map((n) => ({ note: n.note, priority: n.priority }));
   }
 
+  // ─── Feature 7: Smart Context Composition ────────────────────────────
+  // Load all chapter summaries for the book sorted by chapter order.
+  // Recent 5 get full summaries, older ones get just key events.
+  const allChapters = await storage.getChapters(bookId);
+  const sortedChapters = allChapters.sort((a, b) => a.orderIndex - b.orderIndex);
+  const chapterSummaries = await storage.getChapterSummariesForBook(bookId);
+
+  // Build a map: chapterId -> summary
+  const summaryMap = new Map(chapterSummaries.map((s) => [s.chapterId, s]));
+
+  // Current chapter index (for determining "recent" vs "old")
+  let currentIdx = sortedChapters.length;
+  if (chapterId) {
+    const curIdx = sortedChapters.findIndex((c) => c.id === chapterId);
+    if (curIdx !== -1) currentIdx = curIdx;
+  }
+
+  // Build rolling summary dynamically from per-chapter summaries
+  const rollingParts: string[] = [];
+  for (let i = 0; i < currentIdx; i++) {
+    const ch = sortedChapters[i];
+    const sum = summaryMap.get(ch.id);
+    if (!sum) continue;
+
+    const chapterLabel = `[Ch ${i + 1}: ${ch.title}]`;
+    const distanceFromCurrent = currentIdx - i;
+
+    if (distanceFromCurrent <= 5) {
+      // Recent chapters: full summary
+      rollingParts.push(`${chapterLabel} ${sum.summary}`);
+    } else {
+      // Older chapters: just key events (1 sentence)
+      const keyEvts = sum.keyEvents as string[];
+      if (keyEvts && keyEvts.length > 0) {
+        rollingParts.push(`${chapterLabel} ${keyEvts[0]}`);
+      }
+    }
+  }
+
+  if (rollingParts.length > 0) {
+    ctx.rollingSummary = rollingParts.join("\n\n");
+  } else {
+    // Fall back to bible rolling summary if no per-chapter summaries exist
+    ctx.rollingSummary = bible?.rollingSummary ?? null;
+  }
+
+  // ─── Feature 5: Plot Thread Auto-Warnings ──────────────────────────────
+  // Check for stale plot threads: open threads not mentioned in last 10 summaries
+  const entities = (bible?.entities ?? {}) as any;
+  if (entities.plotThreads && entities.plotThreads.length > 0) {
+    const recentSummaryTexts = sortedChapters
+      .slice(Math.max(0, currentIdx - 10), currentIdx)
+      .map((ch) => summaryMap.get(ch.id)?.summary ?? "")
+      .join(" ")
+      .toLowerCase();
+
+    const staleThreads: string[] = [];
+    for (const thread of entities.plotThreads) {
+      if (thread.status !== "open") continue;
+      const threadName = (thread.name || "").toLowerCase();
+      if (threadName && !recentSummaryTexts.includes(threadName)) {
+        staleThreads.push(thread.name);
+      }
+    }
+
+    if (staleThreads.length > 0) {
+      const reminders = staleThreads.map(
+        (name) => `REMINDER: Plot thread '${name}' was introduced but hasn't been addressed in recent chapters.`
+      );
+      // Inject as high-priority steering notes
+      if (!ctx.steeringNotes) ctx.steeringNotes = [];
+      for (const reminder of reminders) {
+        ctx.steeringNotes.push({ note: reminder, priority: 100 });
+      }
+    }
+  }
+
+  // ─── Feature 7 cont: Character tracker in context ─────────────────────
+  // If current chapter has an outline, check which characters are mentioned
+  // and include their recent journey data
+  if (chapterId) {
+    const cur = await storage.getChapter(chapterId);
+    if (cur?.outline) {
+      const outlineLower = cur.outline.toLowerCase();
+      const charAppearances: string[] = [];
+      // Look through recent chapter summaries for character data
+      for (let i = Math.max(0, currentIdx - 5); i < currentIdx; i++) {
+        const ch = sortedChapters[i];
+        const sum = summaryMap.get(ch.id);
+        if (!sum) continue;
+        const appearances = sum.characterAppearances as any[];
+        if (!appearances || !appearances.length) continue;
+        for (const app of appearances) {
+          if (app.name && outlineLower.includes(app.name.toLowerCase())) {
+            charAppearances.push(
+              `${app.name} (Ch ${i + 1}): ${app.actions ?? ""}${app.emotionalState ? ` [${app.emotionalState}]` : ""}`
+            );
+          }
+        }
+      }
+      if (charAppearances.length > 0) {
+        if (!ctx.steeringNotes) ctx.steeringNotes = [];
+        ctx.steeringNotes.push({
+          note: `CHARACTER TRACKER (recent appearances):\n${charAppearances.join("\n")}`,
+          priority: 50,
+        });
+      }
+    }
+  }
+
   // For continuity, pull the tail of the immediately-preceding chapter.
   if (chapterId) {
     const cur = await storage.getChapter(chapterId);
     if (cur) {
-      const all = await storage.getChapters(cur.bookId);
-      const prev = all
+      const prev = sortedChapters
         .filter((c) => c.orderIndex < cur.orderIndex)
         .sort((a, b) => b.orderIndex - a.orderIndex)[0];
       if (prev?.content) {
@@ -990,6 +1098,317 @@ export async function registerLlmRoutes(app: Express): Promise<void> {
   // from the LLM provider, enabling real-time typing display in the editor.
   // For now, the frontend shows a Loader2 spinner during generation.
   // ───────────────────────────────────────────────────────────────────────
+
+  // ───────────────────────────────────────────────────────────────────────
+  // Feature 1 & 3: Auto-summarize chapter → per-chapter summary + rolling summary
+  // ───────────────────────────────────────────────────────────────────────
+  app.post("/api/chapters/:id/summarize", async (req, res) => {
+    try {
+      const userId = getUserId(req);
+      const chapterId = Number(req.params.id);
+      const body = z.object({
+        provider: z.string().min(1),
+        model: z.string().min(1),
+        mode: z.enum(["byok", "platform"]).default("byok"),
+        apiKeyId: z.number().int().optional(),
+      }).parse(req.body);
+
+      const chapter = await storage.getChapter(chapterId);
+      if (!chapter) return res.status(404).json({ error: "Chapter not found" });
+      if (!chapter.content || chapter.content.length < 50) {
+        return res.status(400).json({ error: "Chapter has insufficient content to summarize" });
+      }
+
+      if (body.mode === "platform") await assertWithinPlatformQuota(userId, "platform");
+
+      const messages: ChatMessage[] = [
+        {
+          role: "system",
+          content: "You summarize novel chapters. Summarize the given chapter in 3-5 sentences focusing on: key plot events, character developments, new information revealed, unresolved hooks. Also extract structured data. Respond in JSON format: { \"summary\": \"...\", \"keyEvents\": [\"...\"], \"characterAppearances\": [{\"name\": \"...\", \"actions\": \"...\", \"emotionalState\": \"...\", \"relationships\": \"...\"}], \"unresolvedHooks\": [\"...\"] }",
+        },
+        {
+          role: "user",
+          content: `Chapter title: "${chapter.title}"\n\nContent:\n${chapter.content}`,
+        },
+      ];
+
+      const result = await generateChat({
+        userId,
+        providerId: body.provider as ProviderId,
+        mode: body.mode,
+        apiKeyId: body.apiKeyId,
+        model: body.model,
+        messages,
+        temperature: 0.3,
+        maxTokens: 2000,
+        jsonMode: true,
+        feature: "summarize",
+        bookId: chapter.bookId,
+        chapterId,
+      });
+
+      // Parse the response
+      const parsed = extractJson<{
+        summary?: string;
+        keyEvents?: string[];
+        characterAppearances?: any[];
+        unresolvedHooks?: string[];
+      }>(result.text);
+
+      const summaryText = parsed?.summary ?? result.text.slice(0, 500);
+      const keyEvents = parsed?.keyEvents ?? [];
+      const characterAppearances = parsed?.characterAppearances ?? [];
+      const unresolvedHooks = parsed?.unresolvedHooks ?? [];
+
+      // Upsert per-chapter summary (Feature 3)
+      await storage.upsertChapterSummary({
+        chapterId,
+        bookId: chapter.bookId,
+        summary: summaryText,
+        keyEvents: keyEvents as any,
+        characterAppearances: characterAppearances as any,
+        unresolvedHooks: unresolvedHooks as any,
+      });
+
+      // Append to rolling summary in book bible (Feature 1)
+      const bible = await storage.getBookBible(chapter.bookId);
+      const allChapters = await storage.getChapters(chapter.bookId);
+      const chapterIndex = allChapters
+        .sort((a, b) => a.orderIndex - b.orderIndex)
+        .findIndex((c) => c.id === chapterId);
+      const chapterLabel = `[Ch ${chapterIndex + 1}: ${chapter.title}]`;
+      const newEntry = `${chapterLabel} ${summaryText}\n\n`;
+
+      if (bible) {
+        const existing = bible.rollingSummary ?? "";
+        // Replace existing entry for this chapter or append
+        const regex = new RegExp(`\\[Ch ${chapterIndex + 1}:.*?\\].*?\\n\\n`, "s");
+        const updated = regex.test(existing)
+          ? existing.replace(regex, newEntry)
+          : existing + newEntry;
+        await storage.updateBookBible(chapter.bookId, { rollingSummary: updated });
+      } else {
+        await storage.upsertBookBible({
+          bookId: chapter.bookId,
+          rollingSummary: newEntry,
+          entities: {},
+          language: "English",
+        });
+      }
+
+      res.json({
+        summary: summaryText,
+        keyEvents,
+        characterAppearances,
+        unresolvedHooks,
+        usage: result,
+      });
+    } catch (err: any) {
+      if (err instanceof z.ZodError) return res.status(400).json({ error: err.errors });
+      if (err instanceof QuotaExceededError) {
+        return res.status(402).json({ error: err.message, used: err.used, limit: err.limit });
+      }
+      const { status, message } = errorToHttpStatus(err);
+      res.status(status).json({ error: message });
+    }
+  });
+
+  // GET per-chapter summary (Feature 3)
+  app.get("/api/chapters/:id/summary", async (req, res) => {
+    try {
+      const chapterId = Number(req.params.id);
+      const summary = await storage.getChapterSummary(chapterId);
+      res.json(summary ?? null);
+    } catch (err: any) {
+      res.status(500).json({ error: err.message });
+    }
+  });
+
+  // GET all chapter summaries for a book (used by context budget + frontend)
+  app.get("/api/books/:id/chapter-summaries", async (req, res) => {
+    try {
+      const bookId = Number(req.params.id);
+      const summaries = await storage.getChapterSummariesForBook(bookId);
+      res.json(summaries);
+    } catch (err: any) {
+      res.status(500).json({ error: err.message });
+    }
+  });
+
+  // ───────────────────────────────────────────────────────────────────────
+  // Feature 2: Expand/Continue
+  // ───────────────────────────────────────────────────────────────────────
+  app.post("/api/generate/expand", async (req, res) => {
+    try {
+      const userId = getUserId(req);
+      const body = z.object({
+        text: z.string().min(1),
+        instruction: z.string().optional(),
+        bookId: z.number().int().optional(),
+        chapterId: z.number().int().optional(),
+        provider: z.string().min(1),
+        model: z.string().min(1),
+        mode: z.enum(["byok", "platform"]).default("byok"),
+        apiKeyId: z.number().int().optional(),
+        targetWords: z.number().int().min(100).max(5000).optional(),
+        temperature: z.number().min(0).max(2).optional(),
+      }).parse(req.body);
+
+      if (body.mode === "platform") await assertWithinPlatformQuota(userId, "platform");
+
+      const targetWords = body.targetWords ?? 500;
+      const instruction = body.instruction ?? `Continue writing naturally from where this left off. Maintain the same voice, POV, and pace. Write approximately ${targetWords} more words.`;
+
+      // Load story context for continuity
+      const ctx = await loadStoryContext(body.bookId, body.chapterId);
+      const ctxBlock = buildStoryContextBlock(ctx);
+
+      // Use last 1000 words of text as context
+      const words = body.text.trim().split(/\s+/);
+      const tail = words.slice(-1000).join(" ");
+
+      const messages: ChatMessage[] = [
+        {
+          role: "system",
+          content: `You are a novelist continuing a chapter. Write ONLY the new text to be appended — do NOT repeat any of the existing text. Match the voice, tense, POV, and rhythm of the passage you're continuing. Write approximately ${targetWords} words. No preamble, no commentary, no markdown.`,
+        },
+      ];
+      if (ctxBlock) {
+        messages.push({ role: "system", content: ctxBlock });
+      }
+      messages.push({
+        role: "user",
+        content: `${instruction}\n\nExisting text (continue from the end):\n\n${tail}`,
+      });
+
+      const result = await generateChat({
+        userId,
+        providerId: body.provider as ProviderId,
+        mode: body.mode,
+        apiKeyId: body.apiKeyId,
+        model: body.model,
+        messages,
+        temperature: body.temperature ?? 0.8,
+        maxTokens: Math.min(16_000, Math.max(1000, targetWords * 4)),
+        feature: "expand",
+        bookId: body.bookId,
+        chapterId: body.chapterId,
+      });
+
+      const generation = await storage.createGeneration({
+        userId,
+        bookId: body.bookId ?? null,
+        chapterId: body.chapterId ?? null,
+        kind: "expand",
+        status: "completed",
+        provider: body.provider as any,
+        model: body.model,
+        mode: body.mode,
+        prompt: messages as any,
+        output: result.text,
+        promptTokens: result.promptTokens,
+        completionTokens: result.completionTokens,
+        totalTokens: result.totalTokens,
+        costMicroCents: result.costMicroCents,
+        durationMs: result.durationMs,
+        metadata: { targetWords, instruction } as any,
+      });
+
+      res.json({ text: result.text, generationId: generation.id, usage: result });
+    } catch (err: any) {
+      if (err instanceof z.ZodError) return res.status(400).json({ error: err.errors });
+      if (err instanceof QuotaExceededError) {
+        return res.status(402).json({ error: err.message, used: err.used, limit: err.limit });
+      }
+      const { status, message } = errorToHttpStatus(err);
+      res.status(status).json({ error: message });
+    }
+  });
+
+  // ───────────────────────────────────────────────────────────────────────
+  // Feature 4: Character Journey Tracker — extract characters from a chapter
+  // ───────────────────────────────────────────────────────────────────────
+  app.post("/api/chapters/:id/extract-characters", async (req, res) => {
+    try {
+      const userId = getUserId(req);
+      const chapterId = Number(req.params.id);
+      const body = z.object({
+        provider: z.string().min(1),
+        model: z.string().min(1),
+        mode: z.enum(["byok", "platform"]).default("byok"),
+        apiKeyId: z.number().int().optional(),
+      }).parse(req.body);
+
+      const chapter = await storage.getChapter(chapterId);
+      if (!chapter) return res.status(404).json({ error: "Chapter not found" });
+      if (!chapter.content || chapter.content.length < 50) {
+        return res.status(400).json({ error: "Chapter has insufficient content" });
+      }
+
+      if (body.mode === "platform") await assertWithinPlatformQuota(userId, "platform");
+
+      const messages: ChatMessage[] = [
+        {
+          role: "system",
+          content: "Extract all character appearances from this chapter. For each character, note: name, what they did, their emotional state, and any relationship changes. Respond in JSON: { \"characters\": [{ \"name\": \"...\", \"actions\": \"...\", \"emotionalState\": \"...\", \"relationships\": \"...\" }] }",
+        },
+        {
+          role: "user",
+          content: `Chapter: "${chapter.title}"\n\n${chapter.content}`,
+        },
+      ];
+
+      const result = await generateChat({
+        userId,
+        providerId: body.provider as ProviderId,
+        mode: body.mode,
+        apiKeyId: body.apiKeyId,
+        model: body.model,
+        messages,
+        temperature: 0.2,
+        maxTokens: 2000,
+        jsonMode: true,
+        feature: "extract_characters",
+        bookId: chapter.bookId,
+        chapterId,
+      });
+
+      const parsed = extractJson<{ characters?: any[] }>(result.text);
+      const characters = parsed?.characters ?? [];
+
+      // Store in chapter summary's characterAppearances
+      const existing = await storage.getChapterSummary(chapterId);
+      if (existing) {
+        await storage.upsertChapterSummary({
+          chapterId,
+          bookId: chapter.bookId,
+          summary: existing.summary,
+          keyEvents: existing.keyEvents as any,
+          characterAppearances: characters as any,
+          unresolvedHooks: existing.unresolvedHooks as any,
+        });
+      } else {
+        await storage.upsertChapterSummary({
+          chapterId,
+          bookId: chapter.bookId,
+          summary: "",
+          keyEvents: [] as any,
+          characterAppearances: characters as any,
+          unresolvedHooks: [] as any,
+        });
+      }
+
+      res.json({ characters, usage: result });
+    } catch (err: any) {
+      if (err instanceof z.ZodError) return res.status(400).json({ error: err.errors });
+      if (err instanceof QuotaExceededError) {
+        return res.status(402).json({ error: err.message, used: err.used, limit: err.limit });
+      }
+      const { status, message } = errorToHttpStatus(err);
+      res.status(status).json({ error: message });
+    }
+  });
+
   app.get("/api/health", (_req, res) => {
     res.json({ status: "ok", timestamp: new Date().toISOString(), version: "1.0.0" });
   });

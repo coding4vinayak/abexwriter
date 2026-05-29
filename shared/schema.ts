@@ -655,3 +655,36 @@ export const insertChapterImageSchema = createInsertSchema(chapterImages).omit({
 
 export type InsertChapterImage = z.infer<typeof insertChapterImageSchema>;
 export type ChapterImage = typeof chapterImages.$inferSelect;
+
+
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Per-chapter summaries — structured data extracted after each chapter is
+// written. Enables smart context composition: recent chapters get full
+// summaries, older chapters get compressed to key events only.
+// ─────────────────────────────────────────────────────────────────────────────
+export const chapterSummaries = pgTable("chapter_summaries", {
+  id: serial("id").primaryKey(),
+  chapterId: integer("chapter_id").notNull().unique().references(() => chapters.id, { onDelete: "cascade" }),
+  bookId: integer("book_id").notNull().references(() => books.id, { onDelete: "cascade" }),
+  summary: text("summary").notNull(),
+  keyEvents: jsonb("key_events").notNull().default(sql`'[]'::jsonb`),
+  characterAppearances: jsonb("character_appearances").notNull().default(sql`'[]'::jsonb`),
+  unresolvedHooks: jsonb("unresolved_hooks").notNull().default(sql`'[]'::jsonb`),
+  createdAt: timestamp("created_at").notNull().defaultNow(),
+  updatedAt: timestamp("updated_at").notNull().defaultNow(),
+});
+
+export const chapterSummariesRelations = relations(chapterSummaries, ({ one }) => ({
+  chapter: one(chapters, { fields: [chapterSummaries.chapterId], references: [chapters.id] }),
+  book: one(books, { fields: [chapterSummaries.bookId], references: [books.id] }),
+}));
+
+export const insertChapterSummarySchema = createInsertSchema(chapterSummaries).omit({
+  id: true,
+  createdAt: true,
+  updatedAt: true,
+});
+
+export type InsertChapterSummary = z.infer<typeof insertChapterSummarySchema>;
+export type ChapterSummary = typeof chapterSummaries.$inferSelect;

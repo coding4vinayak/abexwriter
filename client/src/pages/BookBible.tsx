@@ -24,6 +24,7 @@ import {
   GitBranch,
   Flag,
   ScrollText,
+  AlertTriangle,
 } from "lucide-react";
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -108,6 +109,25 @@ export default function BookBiblePage() {
     enabled: !Number.isNaN(id),
   });
 
+  // Feature 4 & 5: Load chapter summaries for character journey + stale plot detection
+  const { data: chapterSummaries } = useQuery({
+    queryKey: ["/api/books", id, "chapter-summaries"],
+    queryFn: async () => {
+      const r = await apiRequest("GET", `/api/books/${id}/chapter-summaries`, undefined);
+      return (await r.json()) as any[];
+    },
+    enabled: !Number.isNaN(id),
+  });
+
+  const { data: allChapters } = useQuery({
+    queryKey: ["/api/books", String(id), "chapters"],
+    queryFn: async () => {
+      const r = await apiRequest("GET", `/api/books/${id}/chapters`, undefined);
+      return (await r.json()) as any[];
+    },
+    enabled: !Number.isNaN(id),
+  });
+
   // Hydrate form when the bible loads.
   useEffect(() => {
     if (!bible) return;
@@ -166,6 +186,50 @@ export default function BookBiblePage() {
     }),
     [entities],
   );
+
+  // Feature 5: Detect stale plot threads (open, introduced >10 chapters ago, no recent mentions)
+  const stalePlotThreads = useMemo(() => {
+    if (!entities.plotThreads || !chapterSummaries || !allChapters) return new Set<string>();
+    const totalChapters = allChapters.length;
+    if (totalChapters <= 10) return new Set<string>();
+
+    const recentSummaryTexts = chapterSummaries
+      .slice(-10)
+      .map((s: any) => (s.summary ?? "").toLowerCase())
+      .join(" ");
+
+    const stale = new Set<string>();
+    for (const thread of entities.plotThreads) {
+      if (thread.status !== "open") continue;
+      const name = (thread.name || "").toLowerCase();
+      if (name && !recentSummaryTexts.includes(name)) {
+        stale.add(thread.name);
+      }
+    }
+    return stale;
+  }, [entities.plotThreads, chapterSummaries, allChapters]);
+
+  // Feature 4: Build character "last seen" data from chapter summaries
+  const characterLastSeen = useMemo(() => {
+    if (!chapterSummaries || !allChapters) return new Map<string, string>();
+    const sortedChapters = [...allChapters].sort((a: any, b: any) => a.orderIndex - b.orderIndex);
+    const lastSeenMap = new Map<string, string>();
+
+    for (const summary of chapterSummaries) {
+      const appearances = summary.characterAppearances as any[];
+      if (!appearances || !appearances.length) continue;
+      const chapter = sortedChapters.find((c: any) => c.id === summary.chapterId);
+      if (!chapter) continue;
+      const chIdx = sortedChapters.indexOf(chapter) + 1;
+      for (const app of appearances) {
+        if (app.name) {
+          const info = `Chapter ${chIdx}${app.emotionalState ? ` (${app.emotionalState})` : ""}${app.actions ? ` — ${app.actions}` : ""}`;
+          lastSeenMap.set(app.name.toLowerCase(), info);
+        }
+      }
+    }
+    return lastSeenMap;
+  }, [chapterSummaries, allChapters]);
 
   if (bookLoading || bibleLoading) {
     return (
@@ -337,7 +401,13 @@ export default function BookBiblePage() {
             items={entities.characters ?? []}
             onChange={(items) => onChange(setEntities)({ ...entities, characters: items })}
             renderRow={(c, idx, onUpdate, onDelete) => (
-              <CharacterRow key={idx} value={c} onChange={onUpdate} onDelete={onDelete} />
+              <CharacterRow
+                key={idx}
+                value={c}
+                onChange={onUpdate}
+                onDelete={onDelete}
+                lastSeen={characterLastSeen.get(c.name.toLowerCase())}
+              />
             )}
             blank={() =>
               ({ name: "New character", role: "", description: "" }) as Character
@@ -369,7 +439,13 @@ export default function BookBiblePage() {
             items={entities.plotThreads ?? []}
             onChange={(items) => onChange(setEntities)({ ...entities, plotThreads: items })}
             renderRow={(p, idx, onUpdate, onDelete) => (
-              <PlotThreadRow key={idx} value={p} onChange={onUpdate} onDelete={onDelete} />
+              <PlotThreadRow
+                key={idx}
+                value={p}
+                onChange={onUpdate}
+                onDelete={onDelete}
+                isStale={stalePlotThreads.has(p.name)}
+              />
             )}
             blank={() =>
               ({ name: "New thread", status: "open", description: "" }) as PlotThread
@@ -517,10 +593,12 @@ function CharacterRow({
   value,
   onChange,
   onDelete,
+  lastSeen,
 }: {
   value: Character;
   onChange: (next: Character) => void;
   onDelete: () => void;
+  lastSeen?: string;
 }) {
   return (
     <div className="border border-border rounded-md p-3 space-y-2">
@@ -559,6 +637,11 @@ function CharacterRow({
           placeholder="Arc (cynic → believer, etc.)"
         />
       </div>
+      {lastSeen && (
+        <p className="text-xs text-muted-foreground italic">
+          Last seen in: {lastSeen}
+        </p>
+      )}
     </div>
   );
 }
@@ -567,10 +650,12 @@ function PlotThreadRow({
   value,
   onChange,
   onDelete,
+  isStale,
 }: {
   value: PlotThread;
   onChange: (next: PlotThread) => void;
   onDelete: () => void;
+  isStale?: boolean;
 }) {
   return (
     <div className="border border-border rounded-md p-3 space-y-2">
@@ -592,6 +677,12 @@ function PlotThreadRow({
           <option value="resolved">resolved</option>
           <option value="abandoned">abandoned</option>
         </select>
+        {isStale && (
+          <Badge variant="outline" className="text-yellow-600 border-yellow-400 bg-yellow-50 dark:bg-yellow-950 dark:text-yellow-400">
+            <AlertTriangle className="h-3 w-3 mr-1" />
+            Stale
+          </Badge>
+        )}
         <Button variant="ghost" size="sm" onClick={onDelete}>
           <Trash2 className="h-4 w-4" />
         </Button>
@@ -602,6 +693,11 @@ function PlotThreadRow({
         onChange={(e) => onChange({ ...value, description: e.target.value })}
         placeholder="What this thread is and what payoff it needs"
       />
+      {isStale && (
+        <p className="text-xs text-yellow-600 dark:text-yellow-400">
+          This thread hasn't been mentioned in the last 10 chapter summaries. Consider resolving or advancing it.
+        </p>
+      )}
     </div>
   );
 }

@@ -10,6 +10,8 @@ import GenerateChapterDialog from "@/components/GenerateChapterDialog";
 import HumanizeDialog from "@/components/HumanizeDialog";
 import ImageGenerateDialog from "@/components/ImageGenerateDialog";
 import ChapterImageGallery from "@/components/ChapterImageGallery";
+import ExpandContinueDialog from "@/components/ExpandContinueDialog";
+import ContextBudget from "@/components/ContextBudget";
 import { apiRequest, queryClient } from "@/lib/queryClient";
 import type { Book, Chapter } from "@shared/schema";
 import { Button } from "@/components/ui/button";
@@ -31,6 +33,8 @@ export default function Editor() {
   const [humanizeOpen, setHumanizeOpen] = useState(false);
   const [imageDialogOpen, setImageDialogOpen] = useState(false);
   const [galleryOpen, setGalleryOpen] = useState(false);
+  const [expandOpen, setExpandOpen] = useState(false);
+  const [summarizing, setSummarizing] = useState(false);
 
   // Fetch book data
   const { data: book, isLoading: isLoadingBook } = useQuery({
@@ -216,7 +220,6 @@ export default function Editor() {
   };
 
   const handleAutoEdit = () => {
-    // Auto-edit (grammar/style passes) is queued for the humanizer PR.
     toast({
       title: "Auto-Edit not wired yet",
       description:
@@ -228,14 +231,12 @@ export default function Editor() {
   const handleGenerated = (text: string, _generationId: number) => {
     if (!activeChapter) return;
     setContent(text);
-    // Auto-save so it's persisted and shows up in writing activity.
     setIsSaving(true);
     saveChapterMutation.mutate({ id: activeChapter.id, content: text });
   };
 
   /** Called from the Versions drawer when the user applies a saved version. */
   const handleAppliedFromVersions = () => {
-    // Force a refetch of the current chapter content.
     queryClient.invalidateQueries({ queryKey: ["/api/chapters", String(activeChapter?.id)] });
     if (activeChapter) {
       apiRequest("GET", `/api/chapters/${activeChapter.id}`, undefined)
@@ -246,6 +247,80 @@ export default function Editor() {
         })
         .catch(() => undefined);
     }
+  };
+
+  /** Feature 1: Summarize chapter */
+  const handleSummarize = async () => {
+    if (!activeChapter || !book) return;
+    // We need provider/model — use last stored preference
+    let provider = "openai";
+    let model = "";
+    let mode: "byok" | "platform" = "byok";
+    let apiKeyId: number | undefined;
+    try {
+      const last = localStorage.getItem("abexwriter:lastModel");
+      if (last) {
+        const v = JSON.parse(last);
+        if (v.provider) provider = v.provider;
+        if (v.model) model = v.model;
+        if (v.mode) mode = v.mode;
+      }
+    } catch { /* ignore */ }
+
+    // Get the first active key for this provider
+    try {
+      const keysRes = await apiRequest("GET", "/api/api-keys", undefined);
+      const keys = (await keysRes.json()) as any[];
+      const key = keys.find((k: any) => k.provider === provider && k.isActive);
+      if (key) apiKeyId = key.id;
+
+      if (!model) {
+        const provRes = await apiRequest("GET", "/api/llm/providers", undefined);
+        const provData = (await provRes.json()) as { providers: any[] };
+        const prov = provData.providers.find((p: any) => p.id === provider);
+        if (prov?.models?.[0]) model = prov.models[0].id;
+      }
+    } catch { /* ignore */ }
+
+    if (!model || (!apiKeyId && mode === "byok")) {
+      toast({
+        title: "Configure API key first",
+        description: "Go to Settings > API Keys to add a key before summarizing.",
+        variant: "destructive",
+      });
+      return;
+    }
+
+    setSummarizing(true);
+    try {
+      const body: any = { provider, model, mode };
+      if (apiKeyId) body.apiKeyId = apiKeyId;
+      const res = await apiRequest("POST", `/api/chapters/${activeChapter.id}/summarize`, body);
+      const data = await res.json();
+      toast({
+        title: "Chapter summarized",
+        description: data.summary?.slice(0, 100) + "…",
+      });
+      queryClient.invalidateQueries({ queryKey: ["/api/books", String(book.id), "bible"] });
+      queryClient.invalidateQueries({ queryKey: ["/api/books", String(book.id), "chapter-summaries"] });
+    } catch (err: any) {
+      toast({
+        title: "Summarize failed",
+        description: err?.message ?? "Unknown error",
+        variant: "destructive",
+      });
+    } finally {
+      setSummarizing(false);
+    }
+  };
+
+  /** Feature 2: Expand/continue — append result to content */
+  const handleExpanded = (newText: string, _generationId: number) => {
+    if (!activeChapter) return;
+    const updated = content + "\n\n" + newText;
+    setContent(updated);
+    setIsSaving(true);
+    saveChapterMutation.mutate({ id: activeChapter.id, content: updated });
   };
 
   return (
@@ -263,6 +338,7 @@ export default function Editor() {
         <EditorToolbar
           chapter={activeChapter}
           bookId={book?.id}
+          content={content}
           onSave={handleSave}
           onAutoEdit={handleAutoEdit}
           onGenerateContent={() => {
@@ -279,8 +355,16 @@ export default function Editor() {
             if (!activeChapter) return;
             setImageDialogOpen(true);
           }}
+          onSummarize={handleSummarize}
+          onExpand={() => {
+            if (!activeChapter || !content.trim()) return;
+            setExpandOpen(true);
+          }}
           isSaving={isSaving}
         />
+
+        {/* Feature 6: Context Budget Display */}
+        {book && <ContextBudget bookId={book.id} chapterId={activeChapter?.id} />}
 
         <div className="flex-1 overflow-auto px-4 sm:px-6 lg:px-8 py-6 bg-background max-h-[calc(100vh-60px)]">
           {isLoadingChapter || (chapterId && !currentChapter) ? (
@@ -365,6 +449,16 @@ export default function Editor() {
             setIsSaving(true);
             saveChapterMutation.mutate({ id: activeChapter.id, content: text });
           }}
+        />
+      )}
+      {book && activeChapter && (
+        <ExpandContinueDialog
+          open={expandOpen}
+          onOpenChange={setExpandOpen}
+          bookId={book.id}
+          chapterId={activeChapter.id}
+          currentContent={content}
+          onExpanded={handleExpanded}
         />
       )}
       {book && activeChapter && (
