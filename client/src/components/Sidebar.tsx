@@ -6,6 +6,7 @@ import { apiRequest } from "@/lib/queryClient";
 import { TEMP_USER_ID } from "@/lib/utils";
 import { Book } from "@shared/schema";
 import ThemeToggle from "@/components/ThemeToggle";
+import { useAuth, useLogout } from "@/hooks/useAuth";
 
 interface SidebarProps {
   isVisible: boolean;
@@ -14,6 +15,8 @@ interface SidebarProps {
 
 export default function Sidebar({ isVisible, closeMobileMenu }: SidebarProps) {
   const [location] = useLocation();
+  const { user } = useAuth();
+  const logoutMutation = useLogout();
 
   // Fetch recent projects
   const { data: recentProjects } = useQuery({
@@ -100,22 +103,40 @@ export default function Sidebar({ isVisible, closeMobileMenu }: SidebarProps) {
             <NavigationItem path="/settings" icon="fas fa-tools" label="Settings" />
             <NavigationItem path="/api-keys" icon="fas fa-key" label="API Keys" />
             <NavigationItem path="/database" icon="fas fa-database" label="Database" />
+            <NavigationItem path="/mcp" icon="fas fa-plug" label="MCP" />
             <NavigationItem path="/import" icon="fas fa-upload" label="Import" />
           </nav>
         </div>
       </div>
       
-      <div className="border-t border-border p-4 flex items-center justify-between">
-        <a 
-          href="http://abetworks.in/" 
-          target="_blank" 
-          rel="noopener noreferrer"
-          className="flex items-center text-sm font-medium text-foreground hover:text-primary transition-colors group"
-        >
-          <i className="fas fa-question-circle mr-3 text-muted-foreground group-hover:text-primary"></i>
-          <span>Help & Documentation</span>
-        </a>
-        <ThemeToggle />
+      <div className="border-t border-border p-4 space-y-2">
+        {user && (
+          <div className="flex items-center justify-between">
+            <span className="text-sm text-muted-foreground truncate">
+              <i className="fas fa-user mr-2"></i>
+              {user.username}
+            </span>
+            <button
+              onClick={() => logoutMutation.mutate()}
+              className="text-sm text-muted-foreground hover:text-destructive transition-colors"
+              title="Sign out"
+            >
+              <i className="fas fa-sign-out-alt"></i>
+            </button>
+          </div>
+        )}
+        <div className="flex items-center justify-between">
+          <a 
+            href="http://abetworks.in/" 
+            target="_blank" 
+            rel="noopener noreferrer"
+            className="flex items-center text-sm font-medium text-foreground hover:text-primary transition-colors group"
+          >
+            <i className="fas fa-question-circle mr-3 text-muted-foreground group-hover:text-primary"></i>
+            <span>Help & Documentation</span>
+          </a>
+          <ThemeToggle />
+        </div>
       </div>
     </div>
   );

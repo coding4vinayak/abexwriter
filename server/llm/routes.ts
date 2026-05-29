@@ -48,7 +48,7 @@ import {
 // parity with the existing routes.ts. Centralised here so the swap is one-line.
 // ─────────────────────────────────────────────────────────────────────────────
 function getUserId(_req: Request): number {
-  return 1;
+  return ((_req as any).session?.userId as number) ?? 1;
 }
 
 function publicKey(k: UserApiKey): UserApiKeyPublic {
@@ -1094,10 +1094,142 @@ export async function registerLlmRoutes(app: Express): Promise<void> {
 
   // ───────────────────────────────────────────────────────────────────────
   // Streaming SSE endpoint for chapter content generation
-  // TODO: SSE streaming in future PR — will stream tokens as they arrive
-  // from the LLM provider, enabling real-time typing display in the editor.
-  // For now, the frontend shows a Loader2 spinner during generation.
   // ───────────────────────────────────────────────────────────────────────
+  app.post("/api/generate/chapter-content/stream", async (req, res) => {
+    try {
+      const userId = getUserId(req);
+      const body = chapterContentBodySchema.parse(req.body);
+
+      // Set SSE headers
+      res.setHeader("Content-Type", "text/event-stream");
+      res.setHeader("Cache-Control", "no-cache");
+      res.setHeader("Connection", "keep-alive");
+      res.setHeader("X-Accel-Buffering", "no");
+      res.flushHeaders();
+
+      const ctx = await loadStoryContext(body.bookId, body.chapterId);
+      const book = body.bookId ? await storage.getBook(body.bookId) : undefined;
+
+      const messages = buildContextualChapterContentPrompt(
+        {
+          title: body.title,
+          outline: body.outline,
+          bookTitle: book?.title,
+          bookDescription: book?.description ?? undefined,
+          language: body.language,
+          targetWordCount: body.targetWordCount,
+          previousChapterEnding: ctx.previousChapterEnding ?? undefined,
+        },
+        ctx,
+      );
+
+      // Resolve API key
+      const { openAICompatChatStream } = await import("./openai-compat");
+      const { getProvider } = await import("./providers");
+      const provider = getProvider(body.provider as ProviderId);
+
+      let apiKey = "";
+      let baseUrl = provider.baseUrl || "";
+
+      if (body.mode === "byok" && body.apiKeyId) {
+        const keyRow = await storage.getUserApiKey(body.apiKeyId, userId);
+        if (!keyRow) {
+          res.write(`event: error\ndata: ${JSON.stringify({ error: "API key not found" })}\n\n`);
+          return res.end();
+        }
+        apiKey = decrypt(keyRow.encryptedKey);
+        baseUrl = keyRow.baseUrl || baseUrl;
+      } else if (body.mode === "platform") {
+        // Use platform env key (same as generateChat resolves)
+        const envVarMap: Record<string, string> = {
+          openai: "OPENAI_API_KEY",
+          anthropic: "ANTHROPIC_API_KEY",
+          deepseek: "DEEPSEEK_API_KEY",
+          groq: "GROQ_API_KEY",
+          together: "TOGETHER_API_KEY",
+          mistral: "MISTRAL_API_KEY",
+          openrouter: "OPENROUTER_API_KEY",
+          perplexity: "PERPLEXITY_API_KEY",
+          fireworks: "FIREWORKS_API_KEY",
+          xai: "XAI_API_KEY",
+          gemini: "GOOGLE_GENERATIVE_AI_API_KEY",
+        };
+        const envKey = envVarMap[body.provider] || "";
+        apiKey = process.env[envKey] || "";
+      }
+
+      if (!baseUrl) {
+        res.write(`event: error\ndata: ${JSON.stringify({ error: "No base URL for provider" })}\n\n`);
+        return res.end();
+      }
+
+      const startTime = Date.now();
+
+      const result = await openAICompatChatStream(
+        {
+          providerId: body.provider as ProviderId,
+          baseUrl,
+          apiKey,
+          model: body.model,
+          messages: messages as any,
+          temperature: body.temperature ?? 0.8,
+          maxTokens: body.maxTokens ?? 8000,
+        },
+        (chunk) => {
+          res.write(`data: ${JSON.stringify({ text: chunk })}\n\n`);
+        },
+      );
+
+      const durationMs = Date.now() - startTime;
+
+      // Save generation to DB
+      const generation = await storage.createGeneration({
+        userId,
+        bookId: body.bookId ?? null,
+        chapterId: body.chapterId ?? null,
+        kind: "chapter_content",
+        status: "completed",
+        provider: body.provider as any,
+        model: body.model,
+        mode: body.mode,
+        prompt: messages as any,
+        output: result.text,
+        promptTokens: result.promptTokens,
+        completionTokens: result.completionTokens,
+        totalTokens: result.totalTokens,
+        costMicroCents: 0,
+        durationMs,
+        metadata: {
+          targetWordCount: body.targetWordCount ?? 2500,
+          language: body.language ?? ctx.language ?? "English",
+          streamed: true,
+        } as any,
+      });
+
+      // Send final done event with full text and metadata
+      res.write(
+        `event: done\ndata: ${JSON.stringify({
+          content: result.text,
+          generationId: generation.id,
+          usage: {
+            promptTokens: result.promptTokens,
+            completionTokens: result.completionTokens,
+            totalTokens: result.totalTokens,
+            durationMs,
+          },
+        })}\n\n`,
+      );
+      res.end();
+    } catch (err: any) {
+      if (!res.headersSent) {
+        const { status, message } = errorToHttpStatus(err);
+        res.status(status).json({ error: message });
+      } else {
+        res.write(`event: error\ndata: ${JSON.stringify({ error: err.message ?? "Stream failed" })}\n\n`);
+        res.end();
+      }
+    }
+  });
 
   // ───────────────────────────────────────────────────────────────────────
   // Feature 1 & 3: Auto-summarize chapter → per-chapter summary + rolling summary
