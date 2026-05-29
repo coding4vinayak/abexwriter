@@ -12,6 +12,27 @@ const app = express();
 app.use(express.json());
 app.use(express.urlencoded({ extended: false }));
 
+// ─── CORS configuration ────────────────────────────────────────────────────
+// In production, restrict to your actual domain. In development, allow all.
+app.use((req, res, next) => {
+  const origin = req.headers.origin;
+  if (process.env.NODE_ENV === "production") {
+    // In production, only allow same-origin (the client is served from the same server)
+    // If you split client/server, set CORS_ORIGIN env var
+    const allowedOrigin = process.env.CORS_ORIGIN || origin || "*";
+    res.setHeader("Access-Control-Allow-Origin", allowedOrigin);
+  } else {
+    res.setHeader("Access-Control-Allow-Origin", origin || "*");
+  }
+  res.setHeader("Access-Control-Allow-Methods", "GET, POST, PUT, PATCH, DELETE, OPTIONS");
+  res.setHeader("Access-Control-Allow-Headers", "Content-Type, Authorization");
+  res.setHeader("Access-Control-Allow-Credentials", "true");
+  if (req.method === "OPTIONS") {
+    return res.status(204).end();
+  }
+  next();
+});
+
 app.use((req, res, next) => {
   const start = Date.now();
   const path = req.path;
