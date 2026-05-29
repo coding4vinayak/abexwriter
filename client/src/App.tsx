@@ -18,6 +18,7 @@ import Templates from "@/pages/Templates";
 import TemplateEditor from "@/pages/TemplateEditor";
 import Login from "@/pages/Login";
 import McpStatus from "@/pages/McpStatus";
+import WritingStats from "@/pages/WritingStats";
 import Sidebar from "@/components/Sidebar";
 import MobileNavbar from "@/components/MobileNavbar";
 import { useAuth } from "@/hooks/useAuth";
@@ -37,6 +38,7 @@ function Router() {
       <Route path="/templates" component={Templates} />
       <Route path="/templates/create" component={TemplateEditor} />
       <Route path="/templates/edit/:templateId" component={TemplateEditor} />
+      <Route path="/stats" component={WritingStats} />
       <Route path="/editor/:bookId" component={Editor} />
       <Route path="/editor/:bookId/chapter/:chapterId" component={Editor} />
       <Route path="/books/:bookId/bible" component={BookBible} />

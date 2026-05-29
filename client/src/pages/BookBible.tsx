@@ -25,6 +25,8 @@ import {
   Flag,
   ScrollText,
   AlertTriangle,
+  Loader2,
+  Fingerprint,
 } from "lucide-react";
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -344,6 +346,7 @@ export default function BookBiblePage() {
               />
             </CardContent>
           </Card>
+          <StyleDNASection bookId={id} onResult={(result) => { onChange(setStyleGuide)(result); }} />
           <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
             <Card>
               <CardHeader>
@@ -731,5 +734,127 @@ function SimpleNamedRow({
         placeholder="Description"
       />
     </div>
+  );
+}
+
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Style DNA Fingerprint section
+// ─────────────────────────────────────────────────────────────────────────────
+function StyleDNASection({ bookId, onResult }: { bookId: number; onResult: (text: string) => void }) {
+  const [sampleText, setSampleText] = useState("");
+  const [isAnalyzing, setIsAnalyzing] = useState(false);
+  const { toast } = useToast();
+
+  const handleAnalyze = async () => {
+    if (sampleText.length < 500) {
+      toast({
+        title: "Need more text",
+        description: "Paste at least 500 characters of your own writing to analyze.",
+        variant: "destructive",
+      });
+      return;
+    }
+
+    setIsAnalyzing(true);
+    try {
+      let provider = "openai";
+      let model = "";
+      let mode: "byok" | "platform" = "byok";
+      let apiKeyId: number | undefined;
+
+      try {
+        const last = localStorage.getItem("abexwriter:lastModel");
+        if (last) {
+          const v = JSON.parse(last);
+          if (v.provider) provider = v.provider;
+          if (v.model) model = v.model;
+          if (v.mode) mode = v.mode;
+        }
+      } catch { /* ignore */ }
+
+      const keysRes = await apiRequest("GET", "/api/api-keys", undefined);
+      const keys = (await keysRes.json()) as any[];
+      const key = keys.find((k: any) => k.provider === provider && k.isActive);
+      if (key) apiKeyId = key.id;
+
+      if (!model) {
+        const provRes = await apiRequest("GET", "/api/llm/providers", undefined);
+        const provData = (await provRes.json()) as { providers: any[] };
+        const prov = provData.providers.find((p: any) => p.id === provider);
+        if (prov?.models?.[0]) model = prov.models[0].id;
+      }
+
+      if (!model || (!apiKeyId && mode === "byok")) {
+        toast({
+          title: "Configure API key first",
+          description: "Go to Settings > API Keys to add a key.",
+          variant: "destructive",
+        });
+        return;
+      }
+
+      const body: any = { sampleText, provider, model, mode };
+      if (apiKeyId) body.apiKeyId = apiKeyId;
+
+      const res = await apiRequest("POST", `/api/books/${bookId}/style-dna`, body);
+      const data = await res.json();
+      if (data.styleGuide) {
+        onResult(data.styleGuide);
+        toast({ title: "Style DNA extracted!", description: "Your style guide has been populated." });
+      }
+    } catch (err: any) {
+      toast({
+        title: "Analysis failed",
+        description: err?.message ?? "Unknown error",
+        variant: "destructive",
+      });
+    } finally {
+      setIsAnalyzing(false);
+    }
+  };
+
+  return (
+    <Card>
+      <CardHeader>
+        <CardTitle className="flex items-center gap-2">
+          <Fingerprint className="h-5 w-5" />
+          Generate Style DNA
+        </CardTitle>
+      </CardHeader>
+      <CardContent className="space-y-3">
+        <p className="text-sm text-muted-foreground">
+          Paste a sample of your own writing (500+ characters) and the AI will extract your unique style fingerprint.
+        </p>
+        <Textarea
+          rows={5}
+          value={sampleText}
+          onChange={(e) => setSampleText(e.target.value)}
+          placeholder="Paste your writing sample here... (at least 500 characters)"
+        />
+        <div className="flex items-center gap-2">
+          <Button
+            onClick={handleAnalyze}
+            disabled={isAnalyzing || sampleText.length < 500}
+            size="sm"
+          >
+            {isAnalyzing ? (
+              <>
+                <Loader2 className="h-4 w-4 mr-2 animate-spin" />
+                Analyzing...
+              </>
+            ) : (
+              <>
+                <Fingerprint className="h-4 w-4 mr-2" />
+                Analyze My Voice
+              </>
+            )}
+          </Button>
+          <span className="text-xs text-muted-foreground">
+            {sampleText.length} characters
+          </span>
+        </div>
+      </CardContent>
+    </Card>
   );
 }

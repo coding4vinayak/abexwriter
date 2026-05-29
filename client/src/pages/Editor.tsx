@@ -1,5 +1,5 @@
-import { useState, useEffect } from "react";
-import { useParams } from "wouter";
+import { useState, useEffect, useRef, useCallback, useMemo } from "react";
+import { useParams, useLocation } from "wouter";
 import { useQuery, useMutation } from "@tanstack/react-query";
 import { TEMP_USER_ID, countWords } from "@/lib/utils";
 import ChapterSidebar from "@/components/editor/ChapterSidebar";
@@ -12,6 +12,9 @@ import ImageGenerateDialog from "@/components/ImageGenerateDialog";
 import ChapterImageGallery from "@/components/ChapterImageGallery";
 import ExpandContinueDialog from "@/components/ExpandContinueDialog";
 import ContextBudget from "@/components/ContextBudget";
+import InlineAICommand from "@/components/InlineAICommand";
+import ResearchPanel from "@/components/ResearchPanel";
+import { useKeyboardShortcuts } from "@/hooks/useKeyboardShortcuts";
 import { apiRequest, queryClient } from "@/lib/queryClient";
 import type { Book, Chapter } from "@shared/schema";
 import { Button } from "@/components/ui/button";
@@ -21,12 +24,27 @@ import { useToast } from "@/hooks/use-toast";
 
 export default function Editor() {
   const { bookId, chapterId } = useParams();
+  const [, navigate] = useLocation();
   const { toast } = useToast();
   const [content, setContent] = useState("");
   const [activeChapter, setActiveChapter] = useState<Chapter | null>(null);
   const [isSaving, setIsSaving] = useState(false);
+  const [lastSavedContent, setLastSavedContent] = useState("");
+  const [autoSaveLabel, setAutoSaveLabel] = useState<string | null>(null);
 
-  // Side-panel state.
+  // Focus mode
+  const [focusMode, setFocusMode] = useState(false);
+
+  // Inline AI Command
+  const [commandOpen, setCommandOpen] = useState(false);
+  const [selectedText, setSelectedText] = useState("");
+  const textareaRef = useRef<HTMLTextAreaElement | null>(null);
+  const selectionRef = useRef<{ start: number; end: number }>({ start: 0, end: 0 });
+
+  // Research panel
+  const [researchOpen, setResearchOpen] = useState(false);
+
+  // Side-panel state
   const [steeringOpen, setSteeringOpen] = useState(false);
   const [versionsOpen, setVersionsOpen] = useState(false);
   const [generateOpen, setGenerateOpen] = useState(false);
@@ -35,6 +53,9 @@ export default function Editor() {
   const [galleryOpen, setGalleryOpen] = useState(false);
   const [expandOpen, setExpandOpen] = useState(false);
   const [summarizing, setSummarizing] = useState(false);
+
+  // isDirty
+  const isDirty = content !== lastSavedContent;
 
   // Fetch book data
   const { data: book, isLoading: isLoadingBook } = useQuery({
@@ -49,11 +70,7 @@ export default function Editor() {
   const { data: chapters, isLoading: isLoadingChapters } = useQuery({
     queryKey: ["/api/books", bookId, "chapters"],
     queryFn: async () => {
-      const res = await apiRequest(
-        "GET",
-        `/api/books/${bookId}/chapters`,
-        undefined,
-      );
+      const res = await apiRequest("GET", `/api/books/${bookId}/chapters`, undefined);
       return res.json() as Promise<Chapter[]>;
     },
   });
@@ -74,33 +91,128 @@ export default function Editor() {
     if (currentChapter) {
       setActiveChapter(currentChapter);
       setContent(currentChapter.content || "");
+      setLastSavedContent(currentChapter.content || "");
     } else if (chapters && chapters.length > 0 && !chapterId) {
       setActiveChapter(chapters[0]);
       setContent(chapters[0].content || "");
+      setLastSavedContent(chapters[0].content || "");
     }
   }, [currentChapter, chapters, chapterId]);
+
+  // ───────────────────────────────────────────────────────────────────────
+  // Auto-save (Feature 3): debounce 2000ms after last keystroke
+  // ───────────────────────────────────────────────────────────────────────
+  const autoSaveTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+
+  useEffect(() => {
+    if (!activeChapter) return;
+    if (content === lastSavedContent) return;
+
+    if (autoSaveTimerRef.current) {
+      clearTimeout(autoSaveTimerRef.current);
+    }
+
+    autoSaveTimerRef.current = setTimeout(() => {
+      // Auto-save
+      saveChapterMutation.mutate({ id: activeChapter.id, content });
+      setAutoSaveLabel("Auto-saved");
+      setTimeout(() => setAutoSaveLabel(null), 2000);
+    }, 2000);
+
+    return () => {
+      if (autoSaveTimerRef.current) {
+        clearTimeout(autoSaveTimerRef.current);
+      }
+    };
+  }, [content, activeChapter?.id]); // eslint-disable-line react-hooks/exhaustive-deps
+
+  // ───────────────────────────────────────────────────────────────────────
+  // Unsaved changes warning (Feature 12)
+  // ───────────────────────────────────────────────────────────────────────
+  useEffect(() => {
+    const handleBeforeUnload = (e: BeforeUnloadEvent) => {
+      if (isDirty) {
+        e.preventDefault();
+        e.returnValue = "";
+      }
+    };
+    window.addEventListener("beforeunload", handleBeforeUnload);
+    return () => window.removeEventListener("beforeunload", handleBeforeUnload);
+  }, [isDirty]);
+
+  // ───────────────────────────────────────────────────────────────────────
+  // Keyboard Shortcuts (Feature 4)
+  // ───────────────────────────────────────────────────────────────────────
+  const shortcutHandlers = useMemo(
+    () => ({
+      save: () => handleSave(),
+      generate: () => {
+        if (activeChapter) setGenerateOpen(true);
+      },
+      humanize: () => {
+        if (activeChapter && content.trim()) setHumanizeOpen(true);
+      },
+      expand: () => {
+        if (activeChapter && content.trim()) setExpandOpen(true);
+      },
+      steer: () => setSteeringOpen(true),
+      versions: () => setVersionsOpen(true),
+      focusMode: () => setFocusMode((f) => !f),
+      commandPalette: () => {
+        // Get selected text from textarea
+        const ta = textareaRef.current;
+        if (ta) {
+          const start = ta.selectionStart;
+          const end = ta.selectionEnd;
+          selectionRef.current = { start, end };
+          if (start !== end) {
+            setSelectedText(content.slice(start, end));
+          } else {
+            // Select the current paragraph
+            const before = content.slice(0, start);
+            const after = content.slice(start);
+            const paraStart = before.lastIndexOf("\n\n") + 2 || 0;
+            const paraEnd = after.indexOf("\n\n");
+            const end2 = paraEnd === -1 ? content.length : start + paraEnd;
+            setSelectedText(content.slice(paraStart, end2));
+            selectionRef.current = { start: paraStart, end: end2 };
+          }
+        } else {
+          setSelectedText(content.slice(0, 500));
+          selectionRef.current = { start: 0, end: 500 };
+        }
+        setCommandOpen(true);
+      },
+    }),
+    [activeChapter, content] // eslint-disable-line react-hooks/exhaustive-deps
+  );
+
+  useKeyboardShortcuts(shortcutHandlers);
 
   // ───────────────────────────────────────────────────────────────────────
   // Mutations
   // ───────────────────────────────────────────────────────────────────────
   const saveChapterMutation = useMutation({
-    mutationFn: async ({ id, content }: { id: number; content: string }) => {
-      const res = await apiRequest("PUT", `/api/chapters/${id}`, { content });
+    mutationFn: async ({ id, content: c }: { id: number; content: string }) => {
+      const res = await apiRequest("PUT", `/api/chapters/${id}`, { content: c });
       return res.json() as Promise<Chapter>;
     },
     onSuccess: (data) => {
       setActiveChapter(data);
-      toast({
-        title: "Chapter saved",
-        description: "Your changes have been saved successfully.",
-      });
+      setLastSavedContent(data.content || "");
+      if (!autoSaveLabel) {
+        toast({
+          title: "Chapter saved",
+          description: "Your changes have been saved successfully.",
+        });
+      }
       queryClient.invalidateQueries({ queryKey: ["/api/chapters", String(data.id)] });
       queryClient.invalidateQueries({
         queryKey: ["/api/books", String(data.bookId), "chapters"],
       });
       queryClient.invalidateQueries({ queryKey: ["/api/stats"] });
 
-      // Track word-count delta for the heatmap (kept from original).
+      // Track word-count delta
       const currentWordCount = countWords(content);
       const previousWordCount = activeChapter?.content
         ? countWords(activeChapter.content)
@@ -169,6 +281,7 @@ export default function Editor() {
       queryClient.invalidateQueries({ queryKey: ["/api/stats"] });
       setActiveChapter(data);
       setContent(data.content || "");
+      setLastSavedContent(data.content || "");
     },
     onError: () =>
       toast({
@@ -198,11 +311,15 @@ export default function Editor() {
   // ───────────────────────────────────────────────────────────────────────
   // Handlers
   // ───────────────────────────────────────────────────────────────────────
-  const handleSave = () => {
+  const handleSave = useCallback(() => {
     if (!activeChapter) return;
+    if (autoSaveTimerRef.current) {
+      clearTimeout(autoSaveTimerRef.current);
+      autoSaveTimerRef.current = null;
+    }
     setIsSaving(true);
     saveChapterMutation.mutate({ id: activeChapter.id, content });
-  };
+  }, [activeChapter, content]); // eslint-disable-line react-hooks/exhaustive-deps
 
   const handleCreateChapter = (title: string) => {
     if (!book) return;
@@ -223,7 +340,7 @@ export default function Editor() {
     toast({
       title: "Auto-Edit not wired yet",
       description:
-        "The humanizer / cliché-remover passes ship in a follow-up PR. Use AI Generate for now.",
+        "The humanizer / cliche-remover passes ship in a follow-up PR. Use AI Generate for now.",
     });
   };
 
@@ -243,16 +360,16 @@ export default function Editor() {
         .then((r) => r.json())
         .then((c: Chapter) => {
           setContent(c.content || "");
+          setLastSavedContent(c.content || "");
           setActiveChapter(c);
         })
         .catch(() => undefined);
     }
   };
 
-  /** Feature 1: Summarize chapter */
+  /** Summarize chapter */
   const handleSummarize = async () => {
     if (!activeChapter || !book) return;
-    // We need provider/model — use last stored preference
     let provider = "openai";
     let model = "";
     let mode: "byok" | "platform" = "byok";
@@ -265,9 +382,10 @@ export default function Editor() {
         if (v.model) model = v.model;
         if (v.mode) mode = v.mode;
       }
-    } catch { /* ignore */ }
+    } catch {
+      /* ignore */
+    }
 
-    // Get the first active key for this provider
     try {
       const keysRes = await apiRequest("GET", "/api/api-keys", undefined);
       const keys = (await keysRes.json()) as any[];
@@ -280,7 +398,9 @@ export default function Editor() {
         const prov = provData.providers.find((p: any) => p.id === provider);
         if (prov?.models?.[0]) model = prov.models[0].id;
       }
-    } catch { /* ignore */ }
+    } catch {
+      /* ignore */
+    }
 
     if (!model || (!apiKeyId && mode === "byok")) {
       toast({
@@ -299,10 +419,12 @@ export default function Editor() {
       const data = await res.json();
       toast({
         title: "Chapter summarized",
-        description: data.summary?.slice(0, 100) + "…",
+        description: data.summary?.slice(0, 100) + "...",
       });
       queryClient.invalidateQueries({ queryKey: ["/api/books", String(book.id), "bible"] });
-      queryClient.invalidateQueries({ queryKey: ["/api/books", String(book.id), "chapter-summaries"] });
+      queryClient.invalidateQueries({
+        queryKey: ["/api/books", String(book.id), "chapter-summaries"],
+      });
     } catch (err: any) {
       toast({
         title: "Summarize failed",
@@ -314,7 +436,7 @@ export default function Editor() {
     }
   };
 
-  /** Feature 2: Expand/continue — append result to content */
+  /** Expand/continue */
   const handleExpanded = (newText: string, _generationId: number) => {
     if (!activeChapter) return;
     const updated = content + "\n\n" + newText;
@@ -323,6 +445,58 @@ export default function Editor() {
     saveChapterMutation.mutate({ id: activeChapter.id, content: updated });
   };
 
+  /** Inline AI command result */
+  const handleCommandResult = (newText: string) => {
+    const { start, end } = selectionRef.current;
+    const updated = content.slice(0, start) + newText + content.slice(end);
+    setContent(updated);
+  };
+
+  /** Insert research text */
+  const handleResearchInsert = (text: string) => {
+    const updated = content + text;
+    setContent(updated);
+  };
+
+  // Focus mode: ESC to exit
+  useEffect(() => {
+    if (!focusMode) return;
+    const handler = (e: KeyboardEvent) => {
+      if (e.key === "Escape") setFocusMode(false);
+    };
+    window.addEventListener("keydown", handler);
+    return () => window.removeEventListener("keydown", handler);
+  }, [focusMode]);
+
+  // ───────────────────────────────────────────────────────────────────────
+  // Render: Focus Mode
+  // ───────────────────────────────────────────────────────────────────────
+  if (focusMode) {
+    const wordCount = countWords(content);
+    return (
+      <div className="fixed inset-0 z-50 bg-background flex flex-col items-center justify-center">
+        <div className="w-full max-w-2xl px-6 py-8 flex-1 flex flex-col">
+          <Textarea
+            ref={textareaRef}
+            className="flex-1 w-full text-foreground text-lg leading-relaxed font-serif resize-none border-0 p-0 shadow-none focus:outline-none focus-visible:ring-0 focus-visible:ring-offset-0 bg-transparent"
+            placeholder="Write freely..."
+            value={content}
+            onChange={(e) => setContent(e.target.value)}
+          />
+        </div>
+        <div className="fixed bottom-4 left-1/2 -translate-x-1/2 flex items-center gap-4 text-xs text-muted-foreground">
+          <span>{wordCount.toLocaleString()} words</span>
+          {isDirty && <span className="text-yellow-500">Unsaved</span>}
+          {autoSaveLabel && <span className="text-green-500">{autoSaveLabel}</span>}
+          <span>Press ESC to exit focus mode</span>
+        </div>
+      </div>
+    );
+  }
+
+  // ───────────────────────────────────────────────────────────────────────
+  // Render: Normal Mode
+  // ───────────────────────────────────────────────────────────────────────
   return (
     <div className="flex-1 flex overflow-hidden h-screen">
       <ChapterSidebar
@@ -360,10 +534,14 @@ export default function Editor() {
             if (!activeChapter || !content.trim()) return;
             setExpandOpen(true);
           }}
+          onResearch={() => setResearchOpen(true)}
+          onFocusMode={() => setFocusMode(true)}
           isSaving={isSaving}
+          isDirty={isDirty}
+          autoSaveLabel={autoSaveLabel}
         />
 
-        {/* Feature 6: Context Budget Display */}
+        {/* Context Budget Display */}
         {book && <ContextBudget bookId={book.id} chapterId={activeChapter?.id} />}
 
         <div className="flex-1 overflow-auto px-4 sm:px-6 lg:px-8 py-6 bg-background max-h-[calc(100vh-60px)]">
@@ -374,6 +552,7 @@ export default function Editor() {
           ) : activeChapter ? (
             <div className="max-w-3xl mx-auto bg-card shadow-sm rounded-lg p-6 border border-border">
               <Textarea
+                ref={textareaRef}
                 id="chapter-content"
                 className="w-full h-full min-h-[500px] text-foreground text-base leading-relaxed focus:outline-none font-sans resize-none border-0 p-0 shadow-none focus-visible:ring-0 focus-visible:ring-offset-0 bg-card"
                 placeholder="Start typing your chapter content here, or click 'AI Generate' to draft from your outline."
@@ -476,6 +655,21 @@ export default function Editor() {
           onOpenChange={setGalleryOpen}
         />
       )}
+
+      {/* Inline AI Command Palette */}
+      <InlineAICommand
+        open={commandOpen}
+        onClose={() => setCommandOpen(false)}
+        selectedText={selectedText}
+        onResult={handleCommandResult}
+      />
+
+      {/* Research Panel */}
+      <ResearchPanel
+        open={researchOpen}
+        onOpenChange={setResearchOpen}
+        onInsert={handleResearchInsert}
+      />
     </div>
   );
 }
