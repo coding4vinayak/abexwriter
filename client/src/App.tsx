@@ -9,6 +9,7 @@ import Dashboard from "@/pages/Dashboard";
 import Projects from "@/pages/Projects";
 import Settings from "@/pages/Settings";
 import ApiKeys from "@/pages/ApiKeys";
+import BookBible from "@/pages/BookBible";
 import DatabaseConfig from "@/pages/DatabaseConfig";
 import ImportExport from "@/pages/ImportExport";
 import Editor from "@/pages/Editor";
@@ -33,6 +34,7 @@ function Router() {
       <Route path="/templates/edit/:templateId" component={TemplateEditor} />
       <Route path="/editor/:bookId" component={Editor} />
       <Route path="/editor/:bookId/chapter/:chapterId" component={Editor} />
+      <Route path="/books/:bookId/bible" component={BookBible} />
       <Route component={NotFound} />
     </Switch>
   );
